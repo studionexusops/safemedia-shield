@@ -1,0 +1,19 @@
+# Python virtual environment & caches
+.venv/
+__pycache__/
+*.pyc
+
+# Local AI model weights & generated test images
+models/
+shopify_samples/
+synthetic_tests/
+inpainted_results/
+
+# Node / Cloudflare Worker local files & secrets
+cloudflare_worker/node_modules/
+cloudflare_worker/.wrangler/
+cloudflare_worker/.dev.vars
+cloudflare_worker/wrangler.toml
+
+# OS files
+.DS_Store
