@@ -16,7 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY runpod_worker/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt && \
+    python -c "import torch, numpy as np; assert torch.from_numpy(np.zeros((2,2))).shape == (2,2)"
 
 # Pre-download Big-LaMa and Florence-2 weights via pure HTTP (fast & reliable on RunPod GitHub Builder)
 RUN mkdir -p /app/models /app/hf_cache && \
