@@ -38,7 +38,7 @@ FLORENCE_MODEL_ID = os.environ.get("FLORENCE_MODEL_ID", "microsoft/Florence-2-ba
 
 def fixed_get_imports(filename):
     imports = get_imports(filename)
-    if not torch.cuda.is_available() and "flash_attn" in imports:
+    if "flash_attn" in imports:
         imports.remove("flash_attn")
     return imports
 
