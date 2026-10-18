@@ -25,5 +25,6 @@ RUN mkdir -p /app/models /app/hf_cache && \
     huggingface-cli download microsoft/Florence-2-base
 
 COPY handler.py /app/handler.py
+RUN python -c "from PIL import Image, ImageDraw; from handler import SafeMediaInpaintEngine; eng = SafeMediaInpaintEngine(); img = Image.new('RGB', (256, 256), (240, 240, 240)); d = ImageDraw.Draw(img); d.rectangle([0, 0, 256, 40], fill=(220, 20, 20)); d.text((20, 10), 'SALE 50% OFF', fill=(255, 255, 255)); m = eng.detect_overlay_mask(img); out = eng.inpaint_lama(img, m); print('Self-test passed:', out.size, int(m.max()))"
 
 CMD ["python", "-u", "/app/handler.py"]

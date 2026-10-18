@@ -91,15 +91,30 @@ class SafeMediaInpaintEngine:
     @torch.no_grad()
     def run_florence_ocr(self, image: Image.Image) -> dict:
         task_prompt = "<OCR_WITH_REGION>"
-        inputs = self.florence_processor(
-            text=task_prompt, images=image, return_tensors="pt"
-        ).to(self.device)
+        img_resized = image.convert("RGB").resize((768, 768), resample=Image.Resampling.BICUBIC)
+        arr = np.asarray(img_resized, dtype=np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        arr = (arr - mean) / std
+        pixel_values = (
+            torch.from_numpy(np.ascontiguousarray(arr.transpose(2, 0, 1)))
+            .unsqueeze(0)
+            .to(self.device)
+        )
         if self.device == "cuda":
-            inputs["pixel_values"] = inputs["pixel_values"].to(torch.float16)
+            pixel_values = pixel_values.to(torch.float16)
+
+        prompt_text = "What is the text in the image, with regions?"
+        if hasattr(self.florence_processor, "_construct_prompts"):
+            prompt_text = self.florence_processor._construct_prompts([task_prompt])[0]
+        tok_out = self.florence_processor.tokenizer(
+            [prompt_text], return_tensors=None, padding=False
+        )
+        input_ids = torch.tensor(tok_out["input_ids"], dtype=torch.long, device=self.device)
 
         generated_ids = self.florence_model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
+            input_ids=input_ids,
+            pixel_values=pixel_values,
             max_new_tokens=1024,
             early_stopping=False,
             do_sample=False,
@@ -306,7 +321,8 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
             "mime_type": "image/webp",
         }
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        import traceback
+        return {"status": "error", "message": f"{e}\n{traceback.format_exc()}"}
 
 
 if __name__ == "__main__":
