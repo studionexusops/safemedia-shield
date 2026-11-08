@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a131b"/>
+      <stop offset="50%" stop-color="#0d2222"/>
+      <stop offset="100%" stop-color="#061214"/>
+    </linearGradient>
+    <linearGradient id="cardGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#192833"/>
+      <stop offset="100%" stop-color="#111c24"/>
+    </linearGradient>
+    <linearGradient id="primaryBadgeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#008060"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <linearGradient id="redBadgeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#dc2626"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="16" stdDeviation="24" flood-color="#000000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1600" height="900" fill="url(#bgGrad)"/>
+  <circle cx="800" cy="450" r="400" fill="#008060" opacity="0.12" filter="blur(80px)"/>
+
+  <!-- Top Header Zone -->
+  <g transform="translate(100, 75)">
+    <!-- Category Badge -->
+    <rect width="260" height="36" rx="18" fill="url(#primaryBadgeGrad)"/>
+    <text x="130" y="24" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="14" font-weight="800" letter-spacing="2" fill="#ffffff">DUAL-FEED ROUTING</text>
+
+    <!-- Main Title -->
+    <text x="0" y="85" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="44" font-weight="800" fill="#ffffff" letter-spacing="-0.5">
+      Keep Selling Badges on Store. Clean on Google Shopping.
+    </text>
+
+    <!-- Subtitle -->
+    <text x="0" y="125" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="20" font-weight="400" fill="#94a3b8">
+      Zero UI / Event-Driven AI Inpainting. Separate storefront images from Google Ads automatically.
+    </text>
+  </g>
+
+  <!-- Comparison Cards Container -->
+  <!-- LEFT CARD: Your Storefront -->
+  <g transform="translate(100, 245)" filter="url(#shadow)">
+    <rect width="580" height="580" rx="24" fill="url(#cardGrad)" stroke="#334155" stroke-width="2"/>
+    
+    <!-- Card Header -->
+    <rect x="24" y="24" width="220" height="34" rx="8" fill="#1e293b"/>
+    <text x="134" y="47" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="14" font-weight="700" fill="#f8fafc">🏪 YOUR STOREFRONT</text>
+
+    <text x="556" y="47" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="14" font-weight="700" fill="#38bdf8">Sales Badges Active</text>
+
+    <!-- Product Image Simulation Box -->
+    <g transform="translate(40, 80)">
+      <rect width="500" height="380" rx="16" fill="#f1f5f9"/>
+      
+      <!-- Product Placeholder -->
+      <path d="M 120 280 C 140 230 200 180 270 190 C 330 200 370 170 410 210 C 420 230 420 280 390 290 Z" fill="#64748b" opacity="0.3"/>
+      <ellipse cx="270" cy="240" rx="130" ry="60" fill="#cbd5e1"/>
+      <text x="270" y="248" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+            font-size="22" font-weight="700" fill="#475569">PRODUCT MASTER</text>
+
+      <!-- Prominent Red Sale Corner Badge -->
+      <polygon points="0,0 160,0 0,160" fill="url(#redBadgeGrad)"/>
+      <text x="45" y="55" transform="rotate(-45, 45, 55)" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+            font-size="18" font-weight="900" fill="#ffffff" letter-spacing="1">50% OFF</text>
+
+      <!-- Golden Promotional Banner Ribbon -->
+      <rect x="40" y="310" width="420" height="46" rx="8" fill="#f59e0b"/>
+      <text x="250" y="340" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+            font-size="18" font-weight="900" fill="#78350f" letter-spacing="1">⚡ LIMITED TIME CYBER DEAL ⚡</text>
+    </g>
+
+    <!-- Bottom Status Note -->
+    <rect x="40" y="485" width="500" height="60" rx="12" fill="#0f172a" stroke="#1e293b"/>
+    <circle cx="70" cy="515" r="8" fill="#10b981"/>
+    <text x="92" y="521" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="16" font-weight="700" fill="#f8fafc">Original Store Badges Preserved</text>
+  </g>
+
+  <!-- CENTER ROUTING CONNECTOR -->
+  <g transform="translate(710, 480)">
+    <circle cx="90" cy="30" r="48" fill="#008060" filter="url(#shadow)"/>
+    <path d="M 75 30 L 105 30 M 95 20 L 105 30 L 95 40" stroke="#ffffff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="90" y="105" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="14" font-weight="800" fill="#a7f3d0" letter-spacing="1">AI INPAINT</text>
+    <text x="90" y="125" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="12" font-weight="600" fill="#94a3b8">Cloud AI Engine</text>
+  </g>
+
+  <!-- RIGHT CARD: Google Merchant Center Feed -->
+  <g transform="translate(920, 245)" filter="url(#shadow)">
+    <rect width="580" height="580" rx="24" fill="url(#cardGrad)" stroke="#10b981" stroke-width="2"/>
+    
+    <!-- Card Header -->
+    <rect x="24" y="24" width="260" height="34" rx="8" fill="#064e3b"/>
+    <text x="154" y="47" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="14" font-weight="700" fill="#6ee7b7">🔍 GOOGLE SHOPPING FEED</text>
+
+    <text x="556" y="47" text-anchor="end" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="14" font-weight="700" fill="#10b981">Policy-Safe Ad Feed</text>
+
+    <!-- Clean Image Simulation Box -->
+    <g transform="translate(40, 80)">
+      <rect width="500" height="380" rx="16" fill="#f8fafc"/>
+      
+      <!-- Clean Product Silhouette -->
+      <path d="M 120 280 C 140 230 200 180 270 190 C 330 200 370 170 410 210 C 420 230 420 280 390 290 Z" fill="#64748b" opacity="0.3"/>
+      <ellipse cx="270" cy="240" rx="130" ry="60" fill="#cbd5e1"/>
+      <text x="270" y="248" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+            font-size="22" font-weight="700" fill="#475569">PRODUCT MASTER</text>
+
+      <!-- Clean Badge Pill at top right -->
+      <rect x="330" y="20" width="150" height="32" rx="16" fill="#dcfce7"/>
+      <text x="405" y="42" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+            font-size="13" font-weight="800" fill="#15803d">CLEAN AD FEED</text>
+    </g>
+
+    <!-- Bottom Status Note with Metafield Info -->
+    <rect x="40" y="485" width="500" height="60" rx="12" fill="#022c22" stroke="#065f46"/>
+    <circle cx="70" cy="515" r="8" fill="#10b981"/>
+    <text x="92" y="521" font-family="-apple-system, BlinkMacSystemFont, sans-serif"
+          font-size="15" font-weight="700" fill="#ecfdf5">
+      Stored in Metafield: <tspan fill="#a7f3d0">safemedia.clean_ad_image_url</tspan>
+    </text>
+  </g>
+</svg>

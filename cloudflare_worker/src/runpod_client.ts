@@ -1,19 +1,12 @@
 /**
- * RunPod Serverless Client
- * Calls the RunPod Serverless endpoint to optimize images to WebP.
+ * RunPod Serverless AI Cleanup Client
+ * Pure Dual-Feed: Calls the RunPod Serverless endpoint (Florence-2 + LaMa)
+ * to remove promotional badges, text, and watermarks for Google Merchant Center ad feeds.
  * Features built-in mock fallback for development & offline testing.
  */
 
 import { Env } from "./types";
-
-export interface OptimizationResult {
-  status: "success" | "error";
-  optimizedImageUrl?: string;
-  originalBytes: number;
-  optimizedBytes: number;
-  savingsPercentage: number;
-  message?: string;
-}
+import { isValidPublicImageUrl } from "./index";
 
 export interface CleanAdImageResult {
   status: "success" | "error";
@@ -22,6 +15,8 @@ export interface CleanAdImageResult {
   processingSec: number;
   maskCoveragePct: number;
   engine: string;
+  deferredToCallback?: boolean;
+  jobId?: string;
 }
 
 export class RunPodClient {
@@ -51,7 +46,13 @@ export class RunPodClient {
     precleanedBase64?: string;
     maskCoveragePct?: number;
     processingSec?: number;
+    callbackUrl?: string;
+    engineOverride?: string;
   }): Promise<CleanAdImageResult> {
+    if (!params.precleanedBase64 && !isValidPublicImageUrl(params.imageUrl)) {
+      throw new Error(`Unsafe or invalid image URL blocked by SSRF filter: ${params.imageUrl}`);
+    }
+
     const startMs = Date.now();
     const numericId = params.productId.replace(/\D/g, "") || "prod";
     const filename = `clean_${numericId}_${Date.now()}.jpg`;
@@ -72,13 +73,14 @@ export class RunPodClient {
         bytes[i] = binaryStr.charCodeAt(i);
       }
       imageBytes = bytes;
-      engine = "Florence2-LaMa-LocalVerified";
+      engine = params.engineOverride || "Florence2-LaMa-LocalVerified";
     }
     // Case 2: External Inpainting API URL (e.g. local tunnel or dedicated inference microservice)
     else if (this.inpaintApiUrl) {
       const res = await fetch(this.inpaintApiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(15_000),
         body: JSON.stringify({
           input: {
             task: "inpaint_clean",
@@ -89,7 +91,17 @@ export class RunPodClient {
       if (!res.ok) {
         throw new Error(`Inpaint API error: ${res.status}`);
       }
-      const data = (await res.json()) as any;
+      interface InpaintApiResponse {
+        output?: {
+          image_base64?: string;
+          mask_coverage_pct?: number;
+          processing_sec?: number;
+        };
+        image_base64?: string;
+        mask_coverage_pct?: number;
+        processing_sec?: number;
+      }
+      const data = (await res.json()) as InpaintApiResponse;
       const out = data.output || data;
       if (out.image_base64) {
         const cleanB64 = out.image_base64.replace(/^data:image\/\w+;base64,/, "");
@@ -104,30 +116,84 @@ export class RunPodClient {
         engine = "Florence2-LaMa-API";
       }
     }
-    // Case 3: RunPod Serverless GPU Endpoint
+    // Case 3: RunPod Serverless GPU Endpoint (Webhook Callback Separation + Fast Polling)
     else if (this.apiKey && this.endpointId) {
-      const endpointUrl = `https://api.runpod.ai/v2/${this.endpointId}/runsync`;
+      const endpointUrl = `https://api.runpod.ai/v2/${this.endpointId}/run`;
       const res = await fetch(endpointUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.apiKey}`,
         },
+        signal: AbortSignal.timeout(10_000),
         body: JSON.stringify({
           input: {
             task: "inpaint_clean",
             image_url: params.imageUrl,
             dilate_px: 6,
           },
+          ...(params.callbackUrl ? { webhook: params.callbackUrl } : {}),
         }),
       });
       if (!res.ok) {
-        throw new Error(`RunPod Inpaint API failed: ${res.status}`);
+        throw new Error(`AI Inpaint API failed: ${res.status}`);
       }
-      const data = (await res.json()) as any;
+      interface RunPodServerlessJobResponse {
+        id?: string;
+        status?: string;
+        error?: string;
+        output?: {
+          status?: string;
+          message?: string;
+          image_base64?: string;
+          mask_coverage_pct?: number;
+          processing_sec?: number;
+          engine?: string;
+        };
+      }
+      let data = (await res.json()) as RunPodServerlessJobResponse;
+      let pollCount = 0;
+      // When callbackUrl is registered, poll up to 10s (10 * 1s) so Worker #1 finishes with plenty of headroom (>15s remaining)
+      // before Cloudflare's 30s ctx.waitUntil wall-clock limit; if RunPod is cold-starting (>10s),
+      // RunPod's native webhook callback will deliver the completed output to /webhooks/runpod/callback in a fresh Worker invocation.
+      const maxPollAttempts = params.callbackUrl ? 10 : 25;
+      const pollIntervalMs = params.callbackUrl ? 1000 : 2000;
+      while (
+        (data.status === "IN_QUEUE" || data.status === "IN_PROGRESS") &&
+        data.id &&
+        pollCount < maxPollAttempts
+      ) {
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+        const statusRes = await fetch(`https://api.runpod.ai/v2/${this.endpointId}/status/${data.id}`, {
+          headers: { Authorization: `Bearer ${this.apiKey}` },
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (statusRes.ok) {
+          data = (await statusRes.json()) as RunPodServerlessJobResponse;
+        }
+        pollCount++;
+      }
+      if (
+        params.callbackUrl &&
+        data.id &&
+        (data.status === "IN_QUEUE" || data.status === "IN_PROGRESS")
+      ) {
+        return {
+          status: "success",
+          deferredToCallback: true,
+          jobId: data.id,
+          cleanAdImageUrl: "",
+          processingSec: Number(((Date.now() - startMs) / 1000).toFixed(2)),
+          maskCoveragePct: 0,
+          engine: "RunPod-Serverless-Callback-Pending",
+        };
+      }
       const out = data.output;
       if (!out || out.status !== "success" || !out.image_base64) {
-        throw new Error(`RunPod worker error: ${out?.message || "Missing image_base64"}`);
+        if (data.status === "IN_QUEUE") {
+          throw new Error("AI processing engine is warming up. Please wait 10 seconds and try again.");
+        }
+        throw new Error(`AI processing status=${data.status}: ${out?.message || data.error || "Missing processed image"}`);
       }
       const binaryStr = atob(out.image_base64);
       const bytes = new Uint8Array(binaryStr.length);
@@ -141,9 +207,15 @@ export class RunPodClient {
     }
     // Case 4: Edge Fallback (fetches source image and stores immutable clean copy in R2)
     else {
-      const res = await fetch(params.imageUrl);
-      if (res.ok) {
+      if (!isValidPublicImageUrl(params.imageUrl)) {
+        throw new Error(`Unsafe or invalid image URL for edge fallback: ${params.imageUrl}`);
+      }
+      const res = await fetch(params.imageUrl, { signal: AbortSignal.timeout(10_000) });
+      const contentType = res.headers.get("content-type") || "";
+      if (res.ok && (contentType.startsWith("image/") || contentType === "application/octet-stream")) {
         imageBytes = new Uint8Array(await res.arrayBuffer());
+      } else {
+        throw new Error(`Invalid response or non-image content type (${contentType}) from image URL`);
       }
       engine = "Edge-R2-Proxy (Configure RUNPOD_ENDPOINT_ID or precleanedBase64 for GPU)";
     }
@@ -173,86 +245,6 @@ export class RunPodClient {
       processingSec: elapsedSec,
       maskCoveragePct,
       engine,
-    };
-  }
-
-  /**
-   * Optimize image via Cloudflare Edge or RunPod Serverless.
-   * Strategy A: Instant 0ms cold-start edge optimization.
-   */
-  async optimizeImage(imageUrl: string, quality: number = 82): Promise<OptimizationResult> {
-    // If RunPod credentials are set, delegate to RunPod
-    if (this.apiKey && this.endpointId) {
-      return this.runpodOptimize(imageUrl, quality);
-    }
-
-    // Edge-native Optimization (Strategy A)
-    return this.edgeOptimize(imageUrl, quality);
-  }
-
-  private async edgeOptimize(imageUrl: string, quality: number): Promise<OptimizationResult> {
-    let originalBytes = 2150000;
-    try {
-      // Fetch actual image to measure true file size
-      const res = await fetch(imageUrl);
-      if (res.ok) {
-        const buf = await res.arrayBuffer();
-        if (buf.byteLength > 0) {
-          originalBytes = buf.byteLength;
-        }
-      }
-    } catch {
-      // Fallback to default realistic estimate
-    }
-
-    // High-efficiency WebP compression ratio (~75% - 82% savings)
-    const compressionFactor = Math.max(0.18, (100 - quality * 0.92) / 100);
-    const optimizedBytes = Math.round(originalBytes * compressionFactor);
-    const savings = Math.round(((originalBytes - optimizedBytes) / originalBytes) * 1000) / 10;
-
-    return {
-      status: "success",
-      optimizedImageUrl: imageUrl,
-      originalBytes,
-      optimizedBytes,
-      savingsPercentage: savings,
-    };
-  }
-
-  private async runpodOptimize(imageUrl: string, quality: number): Promise<OptimizationResult> {
-    const endpointUrl = `https://api.runpod.ai/v2/${this.endpointId}/runsync`;
-    const response = await fetch(endpointUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        input: {
-          image_url: imageUrl,
-          quality,
-          format: "WEBP",
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`RunPod API call failed with status: ${response.status}`);
-    }
-
-    const data = (await response.json()) as any;
-    const output = data.output;
-
-    if (!output || output.status !== "success") {
-      throw new Error(`RunPod worker error: ${output?.message || "Unknown error"}`);
-    }
-
-    return {
-      status: "success",
-      optimizedImageUrl: `data:${output.mime_type};base64,${output.image_base64}`,
-      originalBytes: output.original_bytes,
-      optimizedBytes: output.optimized_bytes,
-      savingsPercentage: output.savings_percentage,
     };
   }
 }

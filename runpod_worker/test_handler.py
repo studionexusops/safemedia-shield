@@ -5,7 +5,7 @@ Local unit test for RunPod Serverless Handler logic.
 import base64
 import sys
 import unittest
-from handler import handler, optimize_image
+from handler import handler, fetch_image_bytes
 
 
 class TestRunPodHandler(unittest.TestCase):
@@ -20,7 +20,7 @@ class TestRunPodHandler(unittest.TestCase):
         self.assertEqual(res["status"], "error")
         self.assertIn("Missing", res["message"])
 
-    def test_optimize_base64_image(self):
+    def test_unsupported_task(self):
         try:
             import PIL
         except ImportError:
@@ -29,15 +29,26 @@ class TestRunPodHandler(unittest.TestCase):
 
         res = handler({
             "input": {
+                "task": "optimize",
                 "image_base64": self.sample_png_b64,
                 "quality": 80,
                 "format": "WEBP"
             }
         })
-        self.assertEqual(res["status"], "success")
-        self.assertEqual(res["format"], "webp")
-        self.assertIn("image_base64", res)
-        self.assertGreater(res["optimized_bytes"], 0)
+        self.assertEqual(res["status"], "error")
+        self.assertIn("Unsupported task", res["message"])
+
+    def test_ssrf_blocking_private_ip(self):
+        with self.assertRaises(ValueError):
+            fetch_image_bytes("https://127.0.0.1/evil.png")
+
+    def test_ssrf_blocking_insecure_http(self):
+        with self.assertRaises(ValueError):
+            fetch_image_bytes("http://example.com/evil.png")
+
+    def test_ssrf_blocking_localhost(self):
+        with self.assertRaises(ValueError):
+            fetch_image_bytes("https://localhost/evil.png")
 
 
 if __name__ == "__main__":

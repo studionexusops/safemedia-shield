@@ -1,18 +1,20 @@
 """
-RunPod Serverless AI Cleanup & Image Optimization Worker for SafeMedia Shield
+RunPod Serverless AI Cleanup Worker for SafeMedia Shield (AdFeed Clean)
 Supports:
 1. `task: "inpaint_clean"` (Default for Dual-Feed Smart Routing):
    - Florence-2 (<OCR_WITH_REGION>) text & watermark polygon detection
    - Full-width promotional banner strip detection + morphological character stroke isolation
    - Mask Dilate (6px) + Feather blending (7px)
    - LaMa Fast Fourier Convolution Inpainting (lossless unmasked product pixel preservation)
-2. `task: "optimize"` (WebP non-destructive compression)
 """
 
 import io
 import os
 import time
 import base64
+import ipaddress
+import socket
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 from unittest.mock import patch
@@ -246,19 +248,69 @@ def get_engine() -> SafeMediaInpaintEngine:
     return _ENGINE_SINGLETON
 
 
+MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("HTTP redirects are prohibited for SSRF protection.")
+
+
+def _validate_public_https_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("Only valid https:// image URLs are allowed.")
+    raw_host = parsed.hostname.strip("[]").lower()
+
+    if (
+        raw_host == "localhost"
+        or raw_host == "metadata.google.internal"
+        or raw_host.endswith(".internal")
+        or raw_host.endswith(".local")
+        or raw_host.endswith(".localhost")
+        or raw_host.endswith(".localdomain")
+        or raw_host.endswith(".home.arpa")
+    ):
+        raise ValueError(f"Blocked local or internal hostname: {raw_host}")
+
+    try:
+        addr_info = socket.getaddrinfo(parsed.hostname, parsed.port or 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except Exception as e:
+        raise ValueError(f"DNS resolution failed for hostname '{parsed.hostname}': {e}")
+
+    for res in addr_info:
+        ip_str = res[4][0]
+        ip = ipaddress.ip_address(ip_str)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            raise ValueError(f"Blocked non-public IP address: {ip}")
+
+
 def fetch_image_bytes(image_source: str) -> bytes:
     if image_source.startswith("data:") and ";base64," in image_source:
         _, base64_data = image_source.split(";base64,", 1)
-        return base64.b64decode(base64_data)
-    elif image_source.startswith("http://") or image_source.startswith("https://"):
+        data = base64.b64decode(base64_data)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError(f"Image payload exceeds maximum limit of {MAX_IMAGE_BYTES} bytes.")
+        return data
+    elif image_source.startswith("https://"):
+        _validate_public_https_url(image_source)
+        opener = urllib.request.build_opener(_NoRedirectHandler())
         req = urllib.request.Request(
             image_source,
             headers={"User-Agent": "SafeMediaShield-RunPod/1.0"},
         )
-        with urllib.request.urlopen(req, timeout=20) as response:
-            return response.read()
+        with opener.open(req, timeout=15) as response:
+            data = response.read(MAX_IMAGE_BYTES + 1)
+            if len(data) > MAX_IMAGE_BYTES:
+                raise ValueError(f"Image payload exceeds maximum limit of {MAX_IMAGE_BYTES} bytes.")
+            return data
+    elif image_source.startswith("http://"):
+        raise ValueError("Insecure 'http://' URLs are not permitted. Use 'https://'.")
     else:
-        return base64.b64decode(image_source)
+        data = base64.b64decode(image_source)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError(f"Image payload exceeds maximum limit of {MAX_IMAGE_BYTES} bytes.")
+        return data
 
 
 def handler(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -303,22 +355,9 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
                 "height": cleaned_img.height,
             }
 
-        # Fallback: standard WebP optimization
-        quality = int(job_input.get("quality", 82))
-        out_buf = io.BytesIO()
-        img_rgb.save(out_buf, format="WEBP", quality=quality, method=6)
-        opt_bytes = out_buf.getvalue()
-        savings_pct = round(((len(raw_bytes) - len(opt_bytes)) / len(raw_bytes)) * 100, 1) if raw_bytes else 0
-
         return {
-            "status": "success",
-            "task": "optimize",
-            "format": "webp",
-            "original_bytes": len(raw_bytes),
-            "optimized_bytes": len(opt_bytes),
-            "savings_percentage": savings_pct,
-            "image_base64": base64.b64encode(opt_bytes).decode("utf-8"),
-            "mime_type": "image/webp",
+            "status": "error",
+            "message": f"Unsupported task: '{task}'. Only 'inpaint_clean' is supported.",
         }
     except Exception as e:
         import traceback

@@ -14,6 +14,13 @@ cloudflare_worker/node_modules/
 cloudflare_worker/.wrangler/
 cloudflare_worker/.dev.vars
 cloudflare_worker/wrangler.toml
+cloudflare_worker/state/
+**/auth.json
 
 # OS files
 .DS_Store
+*.mov
+-
+cloudflare_worker/-
+.wrangler/
+.agents/teamwork/

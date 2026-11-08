@@ -1,0 +1,29 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "e02dce6bc82b8bca2d95a315f567e43b"
+name = "AdFeed Clean: Google Shopping"
+handle = "adfeed-clean-google-shopping"
+application_url = "https://safemedia-shield-worker.safemedia.workers.dev"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = false
+
+[access_scopes]
+scopes = "read_products,write_products"
+
+[auth]
+redirect_urls = [
+  "https://safemedia-shield-worker.safemedia.workers.dev/api/auth/callback"
+]
+
+[webhooks]
+api_version = "2024-10"
+
+[[webhooks.subscriptions]]
+topics = ["app/uninstalled"]
+uri = "https://safemedia-shield-worker.safemedia.workers.dev/webhooks/app/uninstalled"
+
+[[webhooks.subscriptions]]
+compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
+uri = "https://safemedia-shield-worker.safemedia.workers.dev/webhooks/compliance"
