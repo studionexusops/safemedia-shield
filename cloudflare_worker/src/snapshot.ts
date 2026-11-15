@@ -20,13 +20,39 @@ const LAST_ROLLBACK_STORE: Map<string, RollbackExecutionResult> = new Map();
 const MEMORY_BASELINE_POINTER: Map<string, string> = new Map();
 const MEMORY_LATEST_POINTER: Map<string, string> = new Map();
 
+function buildProductVariantCleanMap(prod?: ProductSnapshot): Record<string, string> {
+  const map: Record<string, string> = {};
+  if (!prod) return map;
+  if (prod.dualFeedMetadata?.variantCleanImageMap) {
+    for (const [vid, url] of Object.entries(prod.dualFeedMetadata.variantCleanImageMap)) {
+      if (url) map[vid] = url;
+    }
+  }
+  for (const v of prod.variants || []) {
+    if (v.cleanAdImageUrl) {
+      map[v.variantId] = v.cleanAdImageUrl;
+    }
+  }
+  return map;
+}
+
 export class SnapshotEngine {
   private env: Env;
   private shop: string;
 
   constructor(env: Env, shop: string) {
+    if (!shop || shop.length > 100 || !/^[a-zA-Z0-9][a-zA-Z0-9-]{1,60}\.myshopify\.com$/.test(shop)) {
+      throw new Error(`Security Violation: Invalid Shopify shop domain '${shop}'`);
+    }
     this.env = env;
     this.shop = shop;
+  }
+
+  private assertTenantSnapshotKey(key: string): void {
+    const expectedPrefix = `snapshots/${this.shop}/`;
+    if (!key || !key.startsWith(expectedPrefix) || key.includes("..")) {
+      throw new Error(`Tenant Isolation Breach: Snapshot key '${key}' outside '${expectedPrefix}'`);
+    }
   }
 
   /**
@@ -134,6 +160,7 @@ export class SnapshotEngine {
       try {
         const pointer = (await baseObj.json()) as { key?: string; baselineSnapshotId?: string };
         const key = pointer.key || `snapshots/${this.shop}/${pointer.baselineSnapshotId}.json`;
+        this.assertTenantSnapshotKey(key);
         const snapObj = await this.env.SNAPSHOT_BUCKET.get(key);
         if (!snapObj) return null;
         return (await snapObj.json()) as StoreSnapshot;
@@ -264,6 +291,7 @@ export class SnapshotEngine {
       const pointerObj = await this.env.SNAPSHOT_BUCKET.get(`snapshots/${this.shop}/latest.json`);
       if (!pointerObj) return null;
       const pointer = (await pointerObj.json()) as { key: string };
+      this.assertTenantSnapshotKey(pointer.key);
       const snapObj = await this.env.SNAPSHOT_BUCKET.get(pointer.key);
       if (!snapObj) return null;
       return (await snapObj.json()) as StoreSnapshot;
@@ -287,6 +315,7 @@ export class SnapshotEngine {
     if (this.env.SNAPSHOT_BUCKET) {
       const listed = await this.env.SNAPSHOT_BUCKET.list({
         prefix: `snapshots/${this.shop}/`,
+        ...({ include: ["customMetadata"] } as Record<string, unknown>),
       });
 
       const snapshotFiles = listed.objects.filter((o) => {
@@ -317,8 +346,8 @@ export class SnapshotEngine {
           createdAt = file.customMetadata.createdAt;
         }
 
-        // If metadata was absent, read JSON file
-        if (totalProducts === 0 && (isBase || isLate)) {
+        // If metadata was absent, read JSON file as fallback for all snapshots
+        if (totalProducts === 0) {
           try {
             const obj = await this.env.SNAPSHOT_BUCKET.get(file.key);
             if (obj) {
@@ -411,6 +440,37 @@ export class SnapshotEngine {
   }
 
   /**
+   * Clears or marks the rollback suppression record for a specific product when merchant explicitly
+   * triggers canary or full batch re-clean.
+   */
+  async clearRollbackRecordForProduct(productId: string): Promise<void> {
+    const last = await this.getLastRollbackResult();
+    if (!last || !last.productDataDiffs) return;
+    const gid = productId.startsWith("gid://") ? productId : `gid://shopify/Product/${productId}`;
+    let modified = false;
+    for (const diff of last.productDataDiffs) {
+      if (diff.productId === gid || diff.productId === productId) {
+        diff.clearedAfterRollback = true;
+        modified = true;
+      }
+    }
+    if (modified) {
+      LAST_ROLLBACK_STORE.set(this.shop, last);
+      if (this.env.SNAPSHOT_BUCKET) {
+        try {
+          await this.env.SNAPSHOT_BUCKET.put(
+            `state/${this.shop}/last_rollback.json`,
+            JSON.stringify(last, null, 2),
+            { httpMetadata: { contentType: "application/json" } }
+          );
+        } catch {
+          // Non-blocking persistence
+        }
+      }
+    }
+  }
+
+  /**
    * Lists stored snapshot objects directly from Cloudflare R2 bucket.
    * Excludes internal pointer files (latest.json, baseline.json) and enforces max 4 retention (1 Baseline + 3 Rolling).
    */
@@ -494,73 +554,204 @@ export class SnapshotEngine {
     const revertedAt = new Date().toISOString();
     const productDataDiffs: RollbackProductDataDiff[] = [];
 
-    for (const p of products) {
-      const liveProd = beforeProductMap.get(p.productId);
-      const storefrontImageUrl =
-        liveProd?.originalMediaList[0]?.url || p.originalMediaList[0]?.url || "";
-      const beforeCleanMeta = liveProd?.cleanAdImageUrl || null;
+    // Pre-record in-progress rollback marker so any concurrent webhook arriving during rollback execution is suppressed
+    const preRollbackResult: RollbackExecutionResult = {
+      success: true,
+      restoredCount: 0,
+      restoredProducts: 0,
+      snapshotId: targetSnapshot.snapshotId,
+      snapshotTimestamp: targetSnapshot.createdAt,
+      revertedAt,
+      metafieldsRestored: false,
+      productDataDiffs: products.map((p) => {
+        const liveProd = beforeProductMap.get(p.productId);
+        const storefrontImageUrl =
+          liveProd?.originalMediaList[0]?.url || p.originalMediaList[0]?.url || "";
+        const beforeVariantMap = buildProductVariantCleanMap(liveProd);
+        const afterVariantMap = buildProductVariantCleanMap(p);
+        return {
+          productId: p.productId,
+          productTitle: p.productTitle,
+          snapshotId: targetSnapshot.snapshotId,
+          revertedAt,
+          storefrontImageUrl,
+          storefrontUnchanged: true,
+          beforeRevert: {
+            storefrontImageUrl,
+            cleanAdImageMetafield: liveProd?.cleanAdImageUrl || null,
+            gmcImageLink: liveProd?.cleanAdImageUrl || storefrontImageUrl,
+            metaImageLink: liveProd?.cleanAdImageUrl || storefrontImageUrl,
+            variantCount: p.variants.length,
+            cleanedVariantCount: Object.keys(beforeVariantMap).length,
+            variantCleanImageMap: beforeVariantMap,
+            variantLinksPreserved: true,
+          },
+          afterRevert: {
+            storefrontImageUrl,
+            cleanAdImageMetafield: p.cleanAdImageUrl || null,
+            gmcImageLink: p.cleanAdImageUrl || storefrontImageUrl,
+            metaImageLink: p.cleanAdImageUrl || storefrontImageUrl,
+            metafieldAction:
+              p.cleanAdImageUrl || Object.keys(afterVariantMap).length > 0
+                ? "RESTORED_TO_SNAPSHOT"
+                : "PURGED_TO_VIRGIN",
+            variantCount: p.variants.length,
+            cleanedVariantCount: Object.keys(afterVariantMap).length,
+            variantCleanImageMap: afterVariantMap,
+            variantLinksPreserved: true,
+          },
+        };
+      }),
+      beforeAfterComparisons: [],
+      message: "Rollback in progress...",
+    };
+    preRollbackResult.beforeAfterComparisons = preRollbackResult.productDataDiffs;
 
-      // 2. Re-map each variant to its original media ID
-      const revertUpdates = p.variants
-        .filter((v) => Boolean(v.originalMediaId))
-        .map((v) => ({
-          variantId: v.variantId,
-          newMediaId: v.originalMediaId,
-        }));
-
-      if (revertUpdates.length > 0) {
-        await variantManager.rebindVariants(p.productId, revertUpdates);
+    LAST_ROLLBACK_STORE.set(this.shop, preRollbackResult);
+    if (this.env.SNAPSHOT_BUCKET) {
+      try {
+        await this.env.SNAPSHOT_BUCKET.put(
+          `state/${this.shop}/last_rollback.json`,
+          JSON.stringify(preRollbackResult, null, 2),
+          { httpMetadata: { contentType: "application/json" } }
+        );
+      } catch {
+        // Non-blocking persistence
       }
+    }
 
-      // 3. Restore or purge ad-feed hidden metafields to exact snapshot state
-      let afterCleanMeta: string | null = null;
-      let metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN" = "PURGED_TO_VIRGIN";
+    const ROLLBACK_CONCURRENCY = 5;
+    try {
+      for (let i = 0; i < products.length; i += ROLLBACK_CONCURRENCY) {
+        const chunk = products.slice(i, i + ROLLBACK_CONCURRENCY);
+        const chunkDiffs = await Promise.all(
+          chunk.map(async (p): Promise<RollbackProductDataDiff> => {
+            const liveProd = beforeProductMap.get(p.productId);
+            const storefrontImageUrl =
+              liveProd?.originalMediaList[0]?.url || p.originalMediaList[0]?.url || "";
+            const beforeCleanMeta = liveProd?.cleanAdImageUrl || null;
+            const beforeVariantMap = buildProductVariantCleanMap(liveProd);
+            const snapshotVariantMap = buildProductVariantCleanMap(p);
 
-      if (p.cleanAdImageUrl) {
-        await variantManager.setCleanAdImageMetafield(p.productId, p.cleanAdImageUrl, {
-          sourceImageUrl: p.dualFeedMetadata?.sourceImageUrl || p.originalMediaList[0]?.url || "",
-          shopifyImageUrl: p.dualFeedMetadata?.shopifyImageUrl || p.originalMediaList[0]?.url || "",
-          cleanedAt: p.dualFeedMetadata?.cleanedAt || targetSnapshot.createdAt,
-          maskCoveragePct: p.dualFeedMetadata?.maskCoveragePct,
-          processingSec: p.dualFeedMetadata?.processingSec,
-          engine: p.dualFeedMetadata?.engine || "Snapshot-Rollback",
-        });
-        afterCleanMeta = p.cleanAdImageUrl;
-        metafieldAction = "RESTORED_TO_SNAPSHOT";
-      } else {
-        // Snapshot had no clean image; purge metafield to restore virgin state
-        await variantManager.clearCleanAdImageMetafield(p.productId);
-        afterCleanMeta = null;
-        metafieldAction = "PURGED_TO_VIRGIN";
+            // 2. Re-map each variant to its original media ID
+            const revertUpdates = p.variants
+              .filter((v) => Boolean(v.originalMediaId))
+              .map((v) => ({
+                variantId: v.variantId,
+                newMediaId: v.originalMediaId,
+              }));
+
+            if (revertUpdates.length > 0) {
+              await variantManager.rebindVariants(p.productId, revertUpdates);
+            }
+
+            // 3. Restore or purge ad-feed hidden metafields (parent + all variants) to exact snapshot state
+            let afterCleanMeta: string | null = null;
+            let afterVariantMap: Record<string, string> = {};
+            let metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN" = "PURGED_TO_VIRGIN";
+
+            if (p.cleanAdImageUrl || Object.keys(snapshotVariantMap).length > 0) {
+              const restorePrimaryUrl = p.cleanAdImageUrl || Object.values(snapshotVariantMap)[0] || "";
+              await variantManager.setCleanAdImageMetafield(
+                p.productId,
+                restorePrimaryUrl,
+                {
+                  sourceImageUrl: p.dualFeedMetadata?.sourceImageUrl || p.originalMediaList[0]?.url || "",
+                  shopifyImageUrl: p.dualFeedMetadata?.shopifyImageUrl || p.originalMediaList[0]?.url || "",
+                  cleanedAt: p.dualFeedMetadata?.cleanedAt || targetSnapshot.createdAt,
+                  maskCoveragePct: p.dualFeedMetadata?.maskCoveragePct,
+                  processingSec: p.dualFeedMetadata?.processingSec,
+                  engine: p.dualFeedMetadata?.engine || "Snapshot-Rollback",
+                  cleanedImageUrls: p.dualFeedMetadata?.cleanedImageUrls,
+                  variantCleanImageMap: snapshotVariantMap,
+                },
+                snapshotVariantMap
+              );
+
+              // Remove variant metafields that were created after the target snapshot
+              const staleVariantIds = Object.keys(beforeVariantMap).filter((vid) => !snapshotVariantMap[vid]);
+              if (staleVariantIds.length > 0) {
+                await variantManager.clearVariantCleanAdImageMetafields(p.productId, staleVariantIds);
+              }
+
+              afterCleanMeta = restorePrimaryUrl;
+              afterVariantMap = snapshotVariantMap;
+              metafieldAction = "RESTORED_TO_SNAPSHOT";
+            } else {
+              // Snapshot had no clean image; purge product + all variant metafields to restore virgin state
+              const allVariantIdsToPurge = Array.from(
+                new Set([
+                  ...(p.variants || []).map((v) => v.variantId),
+                  ...(liveProd?.variants || []).map((v) => v.variantId),
+                  ...Object.keys(beforeVariantMap),
+                ])
+              );
+              await variantManager.clearCleanAdImageMetafield(p.productId, allVariantIdsToPurge);
+              afterCleanMeta = null;
+              afterVariantMap = {};
+              metafieldAction = "PURGED_TO_VIRGIN";
+            }
+
+            return {
+              productId: p.productId,
+              productTitle: p.productTitle,
+              snapshotId: targetSnapshot.snapshotId,
+              revertedAt,
+              storefrontImageUrl,
+              storefrontUnchanged: true,
+              beforeRevert: {
+                storefrontImageUrl,
+                cleanAdImageMetafield: beforeCleanMeta,
+                gmcImageLink: beforeCleanMeta || storefrontImageUrl,
+                metaImageLink: beforeCleanMeta || storefrontImageUrl,
+                variantCount: p.variants.length,
+                cleanedVariantCount: Object.keys(beforeVariantMap).length,
+                variantCleanImageMap: beforeVariantMap,
+                variantLinksPreserved: true,
+              },
+              afterRevert: {
+                storefrontImageUrl,
+                cleanAdImageMetafield: afterCleanMeta,
+                gmcImageLink: afterCleanMeta || storefrontImageUrl,
+                metaImageLink: afterCleanMeta || storefrontImageUrl,
+                metafieldAction,
+                variantCount: p.variants.length,
+                cleanedVariantCount: Object.keys(afterVariantMap).length,
+                variantCleanImageMap: afterVariantMap,
+                variantLinksPreserved: true,
+              },
+            };
+          })
+        );
+        productDataDiffs.push(...chunkDiffs);
+        restoredCount += chunkDiffs.length;
       }
-
-      productDataDiffs.push({
-        productId: p.productId,
-        productTitle: p.productTitle,
+    } catch (rollbackErr: unknown) {
+      const failResult: RollbackExecutionResult = {
+        success: false,
+        restoredCount,
+        restoredProducts: restoredCount,
         snapshotId: targetSnapshot.snapshotId,
-        revertedAt,
-        storefrontImageUrl,
-        storefrontUnchanged: true,
-        beforeRevert: {
-          storefrontImageUrl,
-          cleanAdImageMetafield: beforeCleanMeta,
-          gmcImageLink: beforeCleanMeta || storefrontImageUrl,
-          metaImageLink: beforeCleanMeta || storefrontImageUrl,
-          variantCount: p.variants.length,
-          variantLinksPreserved: true,
-        },
-        afterRevert: {
-          storefrontImageUrl,
-          cleanAdImageMetafield: afterCleanMeta,
-          gmcImageLink: afterCleanMeta || storefrontImageUrl,
-          metaImageLink: afterCleanMeta || storefrontImageUrl,
-          metafieldAction,
-          variantCount: p.variants.length,
-          variantLinksPreserved: true,
-        },
-      });
-
-      restoredCount++;
+        snapshotTimestamp: targetSnapshot.createdAt,
+        revertedAt: new Date().toISOString(),
+        metafieldsRestored: false,
+        productDataDiffs,
+        beforeAfterComparisons: productDataDiffs,
+        message: "Rollback paused due to a transient error. Please retry to resume remaining products.",
+      };
+      LAST_ROLLBACK_STORE.set(this.shop, failResult);
+      if (this.env.SNAPSHOT_BUCKET) {
+        try {
+          await this.env.SNAPSHOT_BUCKET.put(
+            `state/${this.shop}/last_rollback.json`,
+            JSON.stringify(failResult, null, 2),
+            { httpMetadata: { contentType: "application/json" } }
+          );
+        } catch {
+          // Non-blocking failure state persistence
+        }
+      }
+      throw rollbackErr;
     }
 
     const result: RollbackExecutionResult = {

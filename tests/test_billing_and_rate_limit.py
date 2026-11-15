@@ -391,6 +391,97 @@ class TestStaticCodeContract(unittest.TestCase):
         self.assertIn("step1_btn_trial", self.ui_ts)
         self.assertIn("step1_err_limit_reached", self.ui_ts)
 
+    def test_ui_ts_active_plan_hides_canary_quota_display(self):
+        """Verify that when planStatus === 'ACTIVE', the Free Samples quota badge is hidden in both SSR and client UI."""
+        # SSR hidden logic
+        self.assertIn('canaryQuotaDisplayClass = "hidden text-xs text-gray-500 font-medium";', self.ui_ts)
+        self.assertIn('class="${canaryQuotaDisplayClass}"', self.ui_ts)
+
+        # Client-side dynamic update logic
+        self.assertIn("quotaDisplay.classList.add('hidden');", self.ui_ts)
+        self.assertIn("quotaDisplay.classList.remove('hidden');", self.ui_ts)
+
+        # Mock harness SSR verification
+        from tests.e2e.mock_worker_harness import PRIMARY_SHOP, TestClient
+        client = TestClient()
+        store = client.app.get_store(PRIMARY_SHOP)
+        
+        # When ACTIVE, canary_quota_display must have hidden class
+        store.plan_status = "ACTIVE"
+        res_active = client.get(f"/?shop={PRIMARY_SHOP}")
+        self.assertIn('<span id="canary_quota_display" class="hidden text-xs text-gray-500 font-medium">', res_active.text)
+
+        # When CANARY_TRIAL, canary_quota_display must NOT be hidden
+        store.plan_status = "CANARY_TRIAL"
+        res_trial = client.get(f"/?shop={PRIMARY_SHOP}")
+        self.assertIn('<span id="canary_quota_display" class="text-xs text-gray-500 font-medium">', res_trial.text)
+
+    def test_rollback_prevents_webhook_echo_and_usage_increment(self):
+        """Verify that rolling back to virgin snapshot suppresses subsequent webhook echoes and does not increment Monthly Usage."""
+        from tests.e2e.mock_worker_harness import PRIMARY_SHOP, TestClient, compute_shopify_hmac, WEBHOOK_SECRET
+        import json
+
+        client = TestClient()
+        store = client.app.get_store(PRIMARY_SHOP)
+
+        # 1. Setup store as ACTIVE with initial monthly usage = 1
+        store.plan_status = "ACTIVE"
+        store.monthly_usage_count = 1
+        store.auto_sync_enabled = True
+
+        # Baseline snapshot before cleanup (virgin state: no clean ad metafield)
+        baseline_snap_id = store.create_snapshot()
+
+        # 2. Simulate product having been cleaned
+        prod = store.catalog[0]
+        prod_id_num = prod["id"].split("/")[-1]
+        orig_img_url = (prod.get("media") or [{}])[0].get("url")
+        prod.setdefault("metafields", {})["safemedia.clean_ad_image_url"] = "https://cdn.safemedia.io/clean/old_clean.jpg"
+
+        # 3. Merchant triggers 1-Click Rollback to baseline
+        rollback_res = client.post("/api/rollback", json_data={"shop": PRIMARY_SHOP, "snapshotId": baseline_snap_id})
+        self.assertEqual(rollback_res.status_code, 200)
+        self.assertTrue(rollback_res.json().get("success"))
+        # Clean image metafield is now purged
+        restored_prod = store.catalog[0]
+        self.assertIsNone(restored_prod.get("metafields", {}).get("safemedia.clean_ad_image_url"))
+
+        # 4. Shopify sends products/update webhook for the restored product with the same image
+        payload = {"id": prod_id_num, "image": {"src": orig_img_url}}
+        raw_body = json.dumps(payload).encode("utf-8")
+        headers = {
+            "X-Shopify-Shop-Domain": PRIMARY_SHOP,
+            "X-Shopify-Hmac-Sha256": compute_shopify_hmac(raw_body, WEBHOOK_SECRET),
+            "X-Shopify-Webhook-Id": "webhook_echo_after_rollback_1",
+            "Content-Type": "application/json",
+        }
+
+        wh_res = client.post("/webhooks/products/update", data=raw_body, headers=headers)
+        self.assertEqual(wh_res.status_code, 200)
+        wh_data = wh_res.json()
+        self.assertTrue(wh_data.get("skipped"))
+        self.assertEqual(wh_data.get("reason"), "reverted_by_rollback")
+
+        # 5. Usage MUST NOT be incremented (remains 1)
+        self.assertEqual(store.monthly_usage_count, 1)
+        # Storefront virgin state preserved (no clean image written back)
+        self.assertIsNone(store.catalog[0].get("metafields", {}).get("safemedia.clean_ad_image_url"))
+
+        # 6. If merchant uploads a NEW different image, webhook should process it
+        new_payload = {"id": prod_id_num, "image": {"src": "https://cdn.shopify.com/products/brand_new_decorated_image.jpg"}}
+        new_raw_body = json.dumps(new_payload).encode("utf-8")
+        new_headers = {
+            "X-Shopify-Shop-Domain": PRIMARY_SHOP,
+            "X-Shopify-Hmac-Sha256": compute_shopify_hmac(new_raw_body, WEBHOOK_SECRET),
+            "X-Shopify-Webhook-Id": "webhook_new_image_2",
+            "Content-Type": "application/json",
+        }
+        new_wh_res = client.post("/webhooks/products/update", data=new_raw_body, headers=new_headers)
+        self.assertEqual(new_wh_res.status_code, 200)
+        new_wh_data = new_wh_res.json()
+        self.assertFalse(new_wh_data.get("skipped"))
+        self.assertEqual(store.monthly_usage_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

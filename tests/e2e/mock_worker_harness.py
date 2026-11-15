@@ -138,7 +138,7 @@ def is_valid_public_image_url(raw_url: Optional[str]) -> bool:
         return False
 
 
-def render_dashboard_from_ui_ts(shop: str) -> str:
+def render_dashboard_from_ui_ts(shop: str, store: Optional[Any] = None) -> str:
     """
     Renders dashboard HTML directly from cloudflare_worker/src/ui.ts.
     Guarantees that test assertions inspect the actual application source code,
@@ -184,6 +184,12 @@ def render_dashboard_from_ui_ts(shop: str) -> str:
 
     template = fn_match.group(1)
     rendered = template.replace("${shop}", shop)
+    rendered = rendered.replace("${apiKey}", "e02dce6bc82b8bca2d95a315f567e43b")
+    is_active = store is not None and getattr(store, "plan_status", "") == "ACTIVE"
+    canary_display_cls = "hidden text-xs text-gray-500 font-medium" if is_active else "text-xs text-gray-500 font-medium"
+    canary_display_txt = f"Free Samples: {store.canary_used_count}/5 Used" if store is not None else "Free Samples: 0/5 Used"
+    rendered = rendered.replace("${canaryQuotaDisplayClass}", canary_display_cls)
+    rendered = rendered.replace("${canaryQuotaDisplayText}", canary_display_txt)
     rendered = rendered.replace(r"\`", "`").replace(r"\${", "${")
     return rendered
 
@@ -437,6 +443,13 @@ class MockStoreState:
         self.catalog = copy.deepcopy(snap["products"])
         return True, len(self.catalog), target_id, diffs, snap.get("createdAt", reverted_at)
 
+    def clear_rollback_record_for_product(self, prod_id: str):
+        if not self.last_rollback:
+            return
+        for d in self.last_rollback.get("productDataDiffs", []):
+            if d.get("productId") == prod_id or str(d.get("productId")).endswith(str(prod_id)):
+                d["clearedAfterRollback"] = True
+
 
 def render_mock_ui_html(shop: str, store: MockStoreState) -> str:
     """
@@ -451,6 +464,7 @@ def render_mock_ui_html(shop: str, store: MockStoreState) -> str:
     """
     status_icon = "⚪ Paused" if not store.auto_sync_enabled else "🟢 Active"
     status_badge = "Ad Shield: Active" if store.auto_sync_enabled else "Ad Shield: Paused"
+    canary_hidden_cls = " hidden" if store.plan_status == "ACTIVE" else ""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -574,7 +588,7 @@ def render_mock_ui_html(shop: str, store: MockStoreState) -> str:
           <button id="btn_run_canary" class="px-4 py-2 text-sm font-semibold rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition" data-i18n="btn_run_canary">
             Run 1-Product Canary Preview
           </button>
-          <span id="canary_quota_display" class="text-xs text-gray-500">{store.canary_used_count}/5 Free Samples Used</span>
+          <span id="canary_quota_display" class="text-xs text-gray-500{canary_hidden_cls}">{store.canary_used_count}/5 Free Samples Used</span>
         </div>
         <div class="layer-5-preview" id="canary_preview_container">
           <div class="grid grid-cols-2 gap-4 p-4 bg-gray-50 rounded-lg border text-xs">
@@ -1043,6 +1057,42 @@ class MockWorkerApp:
                             "cleanAdImageUrl": current_clean,
                         }).encode("utf-8"), {**cors_headers, "Content-Type": "application/json"}
 
+                # Rollback Suppression Guard:
+                # Prevent webhook echoes or subsequent edits from triggering auto-cleanup
+                # and incrementing monthly usage when product was reverted via 1-Click Rollback.
+                if store.last_rollback and not payload.get("force_reclean"):
+                    diffs = store.last_rollback.get("productDataDiffs") or []
+                    rb_diff = next((d for d in diffs if d.get("productId") == prod_gid or d.get("productId") == str(product_id)), None)
+                    if rb_diff and not rb_diff.get("clearedAfterRollback"):
+                        after_revert = rb_diff.get("afterRevert") or {}
+                        is_same_img = (
+                            rb_diff.get("storefrontImageUrl") == primary_img or
+                            after_revert.get("storefrontImageUrl") == primary_img
+                        )
+                        if is_same_img:
+                            reverted_at_str = rb_diff.get("revertedAt")
+                            reverted_ts = time.time()
+                            if reverted_at_str:
+                                try:
+                                    import datetime
+                                    reverted_ts = datetime.datetime.fromisoformat(reverted_at_str.replace("Z", "+00:00")).timestamp()
+                                except Exception:
+                                    reverted_ts = time.time()
+                            time_since_revert = time.time() - reverted_ts
+                            is_recent = 0 <= time_since_revert < 120
+                            is_purged_virgin = after_revert.get("metafieldAction") == "PURGED_TO_VIRGIN"
+                            if is_recent or is_purged_virgin:
+                                if webhook_id_header and webhook_id_header.strip():
+                                    store.processed_webhook_ids[webhook_id_header.strip()] = now
+                                return 200, json.dumps({
+                                    "success": True,
+                                    "skipped": True,
+                                    "reason": "reverted_by_rollback",
+                                    "productId": prod_gid,
+                                    "revertedAt": reverted_at_str,
+                                    "message": "Product was restored to virgin snapshot state via 1-Click Rollback. Auto-sync skipped to prevent billing increment.",
+                                }).encode("utf-8"), {**cors_headers, "Content-Type": "application/json"}
+
                 # Pre-Flight Usage Charge for ACTIVE Plan (501+ images)
                 if store.plan_status == "ACTIVE" and store.monthly_usage_count >= store.monthly_included_count:
                     if getattr(store, "simulate_capped_amount_exceeded", False):
@@ -1124,10 +1174,12 @@ class MockWorkerApp:
         def build_feed_preview_payload() -> Dict[str, Any]:
             items = []
             for p in store.catalog:
+                clean_url = (p.get("metafields") or {}).get("safemedia.clean_ad_image_url")
+                if not clean_url:
+                    continue
                 numeric_id = "".join(c for c in p["id"] if c.isdigit()) or "1001"
                 sf_url = (p.get("media") or [{}])[0].get("url", "")
-                clean_url = (p.get("metafields") or {}).get("safemedia.clean_ad_image_url")
-                mapped_url = clean_url or sf_url
+                mapped_url = clean_url
                 items.append({
                     "productId": p["id"],
                     "productTitle": p["title"],
@@ -1156,13 +1208,13 @@ class MockWorkerApp:
                         "channelApp": "Google & YouTube Channel / Google Merchant Center",
                         "targetAttribute": "g:image_link",
                         "sourceMetafield": "product.metafields.safemedia.clean_ad_image_url",
-                        "status": "MAPPED_AND_READY",
+                        "status": "MAPPED_AND_READY" if items else "READY_WAITING_CLEAN_ITEMS",
                     },
                     "metaCatalog": {
                         "channelApp": "Facebook & Instagram Channel / Meta Commerce Manager",
                         "targetAttribute": "image_link",
                         "sourceMetafield": "product.metafields.safemedia.clean_ad_image_url",
-                        "status": "MAPPED_AND_READY",
+                        "status": "MAPPED_AND_READY" if items else "READY_WAITING_CLEAN_ITEMS",
                     },
                 },
                 "items": items,
@@ -1171,7 +1223,7 @@ class MockWorkerApp:
         # GET / (HTML Dashboard)
         if path == "/" and method == "GET":
             if os.environ.get("VERIFY_M2_UI", "1") == "1":
-                html = render_dashboard_from_ui_ts(requested_shop).encode("utf-8")
+                html = render_dashboard_from_ui_ts(requested_shop, store).encode("utf-8")
             else:
                 html = render_mock_ui_html(requested_shop, store).encode("utf-8")
             return 200, html, {**cors_headers, "Content-Type": "text/html; charset=utf-8"}
@@ -1239,6 +1291,21 @@ class MockWorkerApp:
                 )
                 return 200, xml_doc.encode("utf-8"), {**cors_headers, "Content-Type": "application/xml; charset=utf-8"}
             return 200, json.dumps(feed_preview).encode("utf-8"), {**cors_headers, "Content-Type": "application/json"}
+
+        # POST /api/admin/purge-metafields
+        if path == "/api/admin/purge-metafields" and method in ("POST", "GET"):
+            purged_count = 0
+            for p in store.catalog:
+                if (p.get("metafields") or {}).pop("safemedia.clean_ad_image_url", None):
+                    purged_count += 1
+                (p.get("metafields") or {}).pop("safemedia.dual_feed_metadata", None)
+            store.canary_used_count = 0
+            return 200, json.dumps({
+                "success": True,
+                "shop": requested_shop,
+                "purgedCount": purged_count,
+                "canaryUsedCount": 0,
+            }).encode("utf-8"), {**cors_headers, "Content-Type": "application/json"}
 
         # POST /api/billing/subscribe
         if path == "/api/billing/subscribe" and method == "POST":
@@ -1479,6 +1546,7 @@ class MockWorkerApp:
                 if "metafields" not in target_prod:
                     target_prod["metafields"] = {}
                 target_prod["metafields"]["safemedia.clean_ad_image_url"] = clean_img
+                store.clear_rollback_record_for_product(target_prod["id"])
 
                 variant_checks = [
                     {
@@ -1536,6 +1604,7 @@ class MockWorkerApp:
             for p in store.catalog:
                 clean_url = f"https://cdn.safemedia.io/clean/{requested_shop}/{p['id'].split('/')[-1]}_clean.jpg"
                 p.setdefault("metafields", {})["safemedia.clean_ad_image_url"] = clean_url
+                store.clear_rollback_record_for_product(p["id"])
                 p["dualFeedMetadata"] = {
                     "sourceImageUrl": (p.get("media") or [{}])[0].get("url", ""),
                     "cleanedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1581,6 +1650,19 @@ class MockWorkerApp:
                 "shop": requested_shop,
                 "circuitBreakerTripped": False,
                 "message": "Protection resumed.",
+            }).encode("utf-8"), {**cors_headers, "Content-Type": "application/json"}
+
+        # POST /api/batch/cancel
+        if path == "/api/batch/cancel" and method == "POST":
+            store.job_state["status"] = "CANCELLED"
+            store.job_state["estimatedRemainingSec"] = 0
+            store.circuit_breaker_tripped = False
+            return 200, json.dumps({
+                "success": True,
+                "shop": requested_shop,
+                "jobState": store.job_state,
+                "circuitBreakerTripped": False,
+                "message": "Batch processing cancelled and cleared. Safe operations resumed.",
             }).encode("utf-8"), {**cors_headers, "Content-Type": "application/json"}
 
         # POST /api/rollback

@@ -323,21 +323,21 @@ class TestCodeToDocDrift(unittest.TestCase):
             )
 
     # =========================================================================
-    # Part 3: UI Element IDs and I18N Key Count (116 Keys)
+    # Part 3: UI Element IDs and I18N Key Count (122 Keys)
     # =========================================================================
     def test_08_i18n_symmetric_key_count_exactly_116(self):
-        """Verify that I18N in ui.ts defines exactly 116 symmetrical keys for en and ja."""
+        """Verify that I18N in ui.ts defines exactly 122 symmetrical keys for en and ja."""
         en_keys, ja_keys = extract_i18n_keys(self.ui_content)
 
         self.assertEqual(
             len(en_keys),
-            116,
-            f"Expected exactly 116 English I18N keys, found {len(en_keys)}: {en_keys}",
+            122,
+            f"Expected exactly 122 English I18N keys, found {len(en_keys)}: {en_keys}",
         )
         self.assertEqual(
             len(ja_keys),
-            116,
-            f"Expected exactly 116 Japanese I18N keys, found {len(ja_keys)}: {ja_keys}",
+            122,
+            f"Expected exactly 122 Japanese I18N keys, found {len(ja_keys)}: {ja_keys}",
         )
 
         diff = set(en_keys) ^ set(ja_keys)

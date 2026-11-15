@@ -19,6 +19,52 @@ export interface CleanAdImageResult {
   jobId?: string;
 }
 
+const MAX_PRECLEANED_IMAGE_BYTES = 15 * 1024 * 1024; // 15 MB
+
+function isSupportedRasterMagicBytes(bytes: Uint8Array): boolean {
+  if (bytes.length < 12) return false;
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return true;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47 &&
+    bytes[4] === 0x0d &&
+    bytes[5] === 0x0a &&
+    bytes[6] === 0x1a &&
+    bytes[7] === 0x0a
+  ) {
+    return true;
+  }
+  // GIF: GIF87a / GIF89a
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) return true;
+  // WebP: RIFF....WEBP
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function shortUrlHash(input: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
 export class RunPodClient {
   private env: Env;
   private apiKey?: string;
@@ -55,7 +101,8 @@ export class RunPodClient {
 
     const startMs = Date.now();
     const numericId = params.productId.replace(/\D/g, "") || "prod";
-    const filename = `clean_${numericId}_${Date.now()}.jpg`;
+    const imgHash = shortUrlHash(params.imageUrl);
+    const filename = `clean_${numericId}_${imgHash}_${Date.now()}.jpg`;
     const r2Key = `clean_images/${params.shop}/${filename}`;
     const publicCleanUrl = `${params.workerOrigin}/clean-media/${params.shop}/${filename}`;
 
@@ -66,11 +113,24 @@ export class RunPodClient {
 
     // Case 1: Direct base64 from local Python pipeline or webhook worker push
     if (params.precleanedBase64) {
-      const cleanB64 = params.precleanedBase64.replace(/^data:image\/\w+;base64,/, "");
+      const hasDataPrefix = params.precleanedBase64.startsWith("data:");
+      if (hasDataPrefix && !/^data:image\/(jpeg|jpg|png|webp|gif);base64,/i.test(params.precleanedBase64)) {
+        throw new Error("Unsupported precleaned image data URI MIME type.");
+      }
+      const cleanB64 = params.precleanedBase64.replace(/^data:image\/(jpeg|jpg|png|webp|gif);base64,/i, "");
+      if (cleanB64.length > Math.ceil((MAX_PRECLEANED_IMAGE_BYTES * 4) / 3) + 4) {
+        throw new Error("Precleaned base64 payload exceeds maximum allowed image size.");
+      }
       const binaryStr = atob(cleanB64);
+      if (binaryStr.length > MAX_PRECLEANED_IMAGE_BYTES) {
+        throw new Error("Decoded precleaned image exceeds maximum allowed size.");
+      }
       const bytes = new Uint8Array(binaryStr.length);
       for (let i = 0; i < binaryStr.length; i++) {
         bytes[i] = binaryStr.charCodeAt(i);
+      }
+      if (!isSupportedRasterMagicBytes(bytes)) {
+        throw new Error("Precleaned payload failed raster image magic-byte validation.");
       }
       imageBytes = bytes;
       engine = params.engineOverride || "Florence2-LaMa-LocalVerified";
@@ -190,10 +250,10 @@ export class RunPodClient {
       }
       const out = data.output;
       if (!out || out.status !== "success" || !out.image_base64) {
-        if (data.status === "IN_QUEUE") {
+        if (data.status === "IN_QUEUE" || data.status === "IN_PROGRESS") {
           throw new Error("AI processing engine is warming up. Please wait 10 seconds and try again.");
         }
-        throw new Error(`AI processing status=${data.status}: ${out?.message || data.error || "Missing processed image"}`);
+        throw new Error(`AI processing failed (${data.status}). Please try again.`);
       }
       const binaryStr = atob(out.image_base64);
       const bytes = new Uint8Array(binaryStr.length);
@@ -210,10 +270,21 @@ export class RunPodClient {
       if (!isValidPublicImageUrl(params.imageUrl)) {
         throw new Error(`Unsafe or invalid image URL for edge fallback: ${params.imageUrl}`);
       }
-      const res = await fetch(params.imageUrl, { signal: AbortSignal.timeout(10_000) });
+      const res = await fetch(params.imageUrl, {
+        signal: AbortSignal.timeout(10_000),
+        redirect: "error",
+      });
       const contentType = res.headers.get("content-type") || "";
-      if (res.ok && (contentType.startsWith("image/") || contentType === "application/octet-stream")) {
-        imageBytes = new Uint8Array(await res.arrayBuffer());
+      if (
+        res.ok &&
+        ((contentType.startsWith("image/") && !contentType.includes("svg")) ||
+          contentType === "application/octet-stream")
+      ) {
+        const fetchedBytes = new Uint8Array(await res.arrayBuffer());
+        if (fetchedBytes.length > MAX_PRECLEANED_IMAGE_BYTES || !isSupportedRasterMagicBytes(fetchedBytes)) {
+          throw new Error("Fetched image exceeds size limit or failed raster magic-byte validation.");
+        }
+        imageBytes = fetchedBytes;
       } else {
         throw new Error(`Invalid response or non-image content type (${contentType}) from image URL`);
       }

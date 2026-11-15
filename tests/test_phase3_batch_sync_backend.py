@@ -43,12 +43,20 @@ class TestPhase3BackendArchitecture(unittest.TestCase):
         self.assertIn('`state/${shop}/job.json`', self.index_ts)
 
     def test_distributed_runner_lock_safeguard(self):
-        """Verify 20s TTL lock exists to prevent multi-isolate concurrency collision."""
+        """Verify 20s TTL lock, heartbeat renewal, and per-product in-flight lock exist to prevent multi-isolate concurrency collision."""
         self.assertIn("BATCH_LOCK_TTL_MS = 20_000", self.index_ts)
         self.assertIn("async function acquireBatchLock(", self.index_ts)
+        self.assertIn("async function refreshBatchLock(", self.index_ts)
         self.assertIn("async function releaseBatchLock(", self.index_ts)
         self.assertIn("async function isBatchLockActive(", self.index_ts)
         self.assertIn('`locks/${shop}/batch_runner.json`', self.index_ts)
+        chunk_match = re.search(r'async function runBatchChunk\(.*?async function getShopBillingState', self.index_ts, re.DOTALL)
+        self.assertIsNotNone(chunk_match)
+        chunk_body = chunk_match.group(0)
+        self.assertIn("acquireInFlightLock(env, shop, prod.productId)", chunk_body)
+        self.assertIn("releaseInFlightLock(env, shop, prod.productId)", chunk_body)
+        self.assertIn("refreshBatchLock(env, shop)", chunk_body)
+        self.assertIn("cleanedProductIds", chunk_body)
 
     def test_chunk_budget_limits_prevent_30s_timeout(self):
         """Verify 2 items per chunk or 18s execution budget prevents Cloudflare 30s abort."""
@@ -85,6 +93,15 @@ class TestPhase3BackendArchitecture(unittest.TestCase):
         self.assertIsNotNone(resume_match, "Could not find /api/batch/resume route handler")
         resume_code = resume_match.group(0)
         self.assertIn('currentJob.status = "RUNNING"', resume_code)
+
+    def test_batch_cancel_updates_job_and_clears_circuit_breaker(self):
+        """Verify POST /api/batch/cancel sets job status to CANCELLED and clears circuit breaker."""
+        cancel_match = re.search(r'url\.pathname === "/api/batch/cancel".*?return Response\.json', self.index_ts, re.DOTALL)
+        self.assertIsNotNone(cancel_match, "Could not find /api/batch/cancel route handler")
+        cancel_code = cancel_match.group(0)
+        self.assertIn('currentJob.status = "CANCELLED"', cancel_code)
+        self.assertIn("billingState.circuitBreakerTripped = false", cancel_code)
+        self.assertIn("releaseBatchLock", cancel_code)
 
 if __name__ == "__main__":
     unittest.main()

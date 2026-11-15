@@ -3,7 +3,15 @@
  * Solves the structural flaw of variant image disconnection during asset updates.
  */
 
-import { ProductSnapshot, StoreSnapshot, VariantMapping, MediaItem, ShopifyGraphQLResponse } from "./types";
+import {
+  ProductSnapshot,
+  StoreSnapshot,
+  VariantMapping,
+  MediaItem,
+  DualFeedMetadataRecord,
+  ShopifyGraphQLResponse,
+  Env,
+} from "./types";
 
 /**
  * Custom error thrown when Shopify Admin API rejects access due to expired/invalid access token,
@@ -22,8 +30,57 @@ export class ShopifyAuthError extends Error {
 
 interface MockProductMetaState {
   cleanAdImageUrl?: string;
-  dualFeedMetadata?: ProductSnapshot["dualFeedMetadata"];
+  dualFeedMetadata?: DualFeedMetadataRecord;
   variantMediaIds?: Record<string, string>;
+  variantCleanAdImageUrls?: Record<string, string>;
+}
+
+interface GraphQLProductNode {
+  id: string;
+  title: string;
+  descriptionHtml?: string;
+  media?: {
+    edges?: Array<{
+      node: {
+        id: string;
+        mediaContentType?: string;
+        image?: {
+          url: string;
+          altText?: string;
+        };
+      };
+    }>;
+  };
+  variants?: {
+    edges?: Array<{
+      node: {
+        id: string;
+        title: string;
+        sku?: string;
+        price?: string;
+        cleanAdImageMetafield?: {
+          id?: string;
+          value?: string;
+        };
+        media?: {
+          edges?: Array<{
+            node: {
+              id: string;
+              image?: {
+                url: string;
+              };
+            };
+          }>;
+        };
+      };
+    }>;
+  };
+  cleanAdImageMetafield?: {
+    value?: string;
+  };
+  dualFeedMeta?: {
+    value?: string;
+  };
 }
 
 interface ProductsQueryResponse {
@@ -34,97 +91,13 @@ interface ProductsQueryResponse {
     };
     edges?: Array<{
       cursor?: string;
-      node: {
-        id: string;
-        title: string;
-        descriptionHtml?: string;
-        media?: {
-          edges?: Array<{
-            node: {
-              id: string;
-              mediaContentType?: string;
-              image?: {
-                url: string;
-                altText?: string;
-              };
-            };
-          }>;
-        };
-        variants?: {
-          edges?: Array<{
-            node: {
-              id: string;
-              title: string;
-              sku?: string;
-              price?: string;
-              media?: {
-                edges?: Array<{
-                  node: {
-                    id: string;
-                    image?: {
-                      url: string;
-                    };
-                  };
-                }>;
-              };
-            };
-          }>;
-        };
-        cleanAdImageMetafield?: {
-          value?: string;
-        };
-        dualFeedMeta?: {
-          value?: string;
-        };
-      };
+      node: GraphQLProductNode;
     }>;
   };
 }
 
 interface ProductByIdQueryResponse {
-  product?: {
-    id: string;
-    title: string;
-    descriptionHtml?: string;
-    media?: {
-      edges?: Array<{
-        node: {
-          id: string;
-          mediaContentType?: string;
-          image?: {
-            url: string;
-            altText?: string;
-          };
-        };
-      }>;
-    };
-    variants?: {
-      edges?: Array<{
-        node: {
-          id: string;
-          title: string;
-          sku?: string;
-          price?: string;
-          media?: {
-            edges?: Array<{
-              node: {
-                id: string;
-                image?: {
-                  url: string;
-                };
-              };
-            }>;
-          };
-        };
-      }>;
-    };
-    cleanAdImageMetafield?: {
-      value?: string;
-    };
-    dualFeedMeta?: {
-      value?: string;
-    };
-  };
+  product?: GraphQLProductNode;
 }
 
 interface ProductVariantsBulkUpdateResponse {
@@ -206,21 +179,72 @@ interface ActiveSubscriptionsResponse {
 const MOCK_PRODUCT_META_STORE = new Map<string, Map<string, MockProductMetaState>>();
 const PINNED_METAFIELD_DEF_SHOPS = new Set<string>();
 
+const SHOP_DOMAIN_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9-]{1,60}\.myshopify\.com$/;
+
+function assertValidShopDomain(shop: string): void {
+  if (!shop || shop.length > 100 || !SHOP_DOMAIN_PATTERN.test(shop)) {
+    throw new Error(`Security Violation: Invalid Shopify shop domain '${shop}'`);
+  }
+}
+
 export class ShopifyVariantManager {
   private shop: string;
   private accessToken: string;
+  private env?: Env;
 
-  constructor(shop: string, accessToken: string) {
+  constructor(shop: string, accessToken: string, env?: Env) {
+    assertValidShopDomain(shop);
     this.shop = shop;
     this.accessToken = accessToken;
+    this.env = env;
   }
 
   /**
    * Resets in-memory mock product metafield state for a given shop.
    */
-  static resetMockShopState(shop: string): void {
+  static async resetMockShopState(shop: string, env?: Env): Promise<void> {
+    assertValidShopDomain(shop);
     MOCK_PRODUCT_META_STORE.delete(shop);
     PINNED_METAFIELD_DEF_SHOPS.delete(shop);
+    if (env?.SNAPSHOT_BUCKET) {
+      try {
+        await env.SNAPSHOT_BUCKET.delete(`state/${shop}/mock_meta.json`);
+      } catch {}
+    }
+  }
+
+  private async loadMockMetaFromR2(): Promise<void> {
+    if (!this.env?.SNAPSHOT_BUCKET) return;
+    try {
+      const obj = await this.env.SNAPSHOT_BUCKET.get(`state/${this.shop}/mock_meta.json`);
+      if (obj) {
+        const data = (await obj.json()) as Record<string, MockProductMetaState>;
+        const shopMap = this.getShopMockMap();
+        for (const [gid, meta] of Object.entries(data)) {
+          shopMap.set(gid, meta);
+        }
+      }
+    } catch (err) {
+      console.warn(`[ShopifyVariantManager] Failed to load mock meta from R2 for ${this.shop}:`, err);
+    }
+  }
+
+  private async saveMockMetaToR2(): Promise<void> {
+    if (!this.env?.SNAPSHOT_BUCKET) return;
+    try {
+      const shopMap = this.getShopMockMap();
+      const obj: Record<string, MockProductMetaState> = {};
+      for (const [gid, meta] of shopMap.entries()) {
+        obj[gid] = meta;
+      }
+      await this.env.SNAPSHOT_BUCKET.put(
+        `state/${this.shop}/mock_meta.json`,
+        JSON.stringify(obj, null, 2),
+        { httpMetadata: { contentType: "application/json" } }
+      );
+    } catch (err) {
+      console.warn(`[ShopifyVariantManager] Failed to save mock meta to R2 for ${this.shop}:`, err);
+    }
   }
 
   private getShopMockMap(): Map<string, MockProductMetaState> {
@@ -329,14 +353,16 @@ export class ShopifyVariantManager {
   }
 
   /**
-   * Registers and pins the `safemedia.clean_ad_image_url` Product Metafield Definition
-   * so merchants and Shopify App Reviewers can view it directly in Shopify Admin and map it
-   * in Google & YouTube (`g:image_link`) and Facebook & Instagram (`image_link`) channels.
+   * Registers and pins the `safemedia.clean_ad_image_url` Metafield Definition for both
+   * `PRODUCT` and `PRODUCTVARIANT` owner types so merchants and Shopify App Reviewers
+   * can view them directly in Shopify Admin and map them in Google & YouTube (`g:image_link`)
+   * and Facebook & Instagram (`image_link`) channels.
    */
   async ensureCleanAdMetafieldDefinition(): Promise<{
     success: boolean;
     pinned: boolean;
     definitionId?: string;
+    variantDefinitionId?: string;
   }> {
     if (!this.accessToken || this.accessToken.startsWith("mock_")) {
       PINNED_METAFIELD_DEF_SHOPS.add(this.shop);
@@ -344,6 +370,7 @@ export class ShopifyVariantManager {
         success: true,
         pinned: true,
         definitionId: "gid://shopify/MetafieldDefinition/mock_safemedia_clean_ad_image_url",
+        variantDefinitionId: "gid://shopify/MetafieldDefinition/mock_safemedia_variant_clean_ad_image_url",
       };
     }
 
@@ -369,27 +396,14 @@ export class ShopifyVariantManager {
       }
     `;
 
-    try {
-      const json = await this.executeGraphQLWithBackoff(mutation, {
-        definition: {
-          name: "Clean Ad Feed Image URL (Google & Meta)",
-          namespace: "safemedia",
-          key: "clean_ad_image_url",
-          description:
-            "AI-cleaned badge-free product image URL mapped to Google Merchant Center (g:image_link) and Meta Catalog (image_link) while preserving decorated storefront media.",
-          type: "url",
-          ownerType: "PRODUCT",
-          pin: true,
-        },
-      });
+    interface MetafieldDefCreateData {
+      metafieldDefinitionCreate?: {
+        createdDefinition?: { id: string };
+        userErrors?: Array<{ code?: string; message?: string; field?: string[] }>;
+      };
+    }
 
-      interface MetafieldDefCreateData {
-        metafieldDefinitionCreate?: {
-          createdDefinition?: { id: string };
-          userErrors?: Array<{ code?: string; message?: string; field?: string[] }>;
-        };
-      }
-      const resData = json?.data as MetafieldDefCreateData | undefined;
+    const isDefCreatedOrExisting = (resData?: MetafieldDefCreateData): { ok: boolean; id?: string } => {
       const createdId = resData?.metafieldDefinitionCreate?.createdDefinition?.id;
       const userErrors = resData?.metafieldDefinitionCreate?.userErrors || [];
       const alreadyExists = userErrors.some(
@@ -398,10 +412,51 @@ export class ShopifyVariantManager {
           String(e?.message || "").toLowerCase().includes("already") ||
           String(e?.message || "").toLowerCase().includes("taken")
       );
+      return {
+        ok: Boolean(createdId || alreadyExists || userErrors.length === 0),
+        id: createdId,
+      };
+    };
 
-      if (createdId || alreadyExists || userErrors.length === 0) {
+    try {
+      const [prodJson, varJson] = await Promise.all([
+        this.executeGraphQLWithBackoff<MetafieldDefCreateData>(mutation, {
+          definition: {
+            name: "Clean Ad Feed Image URL (Google & Meta)",
+            namespace: "safemedia",
+            key: "clean_ad_image_url",
+            description:
+              "AI-cleaned badge-free product image URL mapped to Google Merchant Center (g:image_link) and Meta Catalog (image_link) while preserving decorated storefront media.",
+            type: "url",
+            ownerType: "PRODUCT",
+            pin: true,
+          },
+        }),
+        this.executeGraphQLWithBackoff<MetafieldDefCreateData>(mutation, {
+          definition: {
+            name: "Clean Variant Ad Feed Image URL (Google & Meta)",
+            namespace: "safemedia",
+            key: "clean_ad_image_url",
+            description:
+              "AI-cleaned badge-free variant image URL mapped to Google Merchant Center (g:image_link) and Meta Catalog (image_link) while preserving decorated storefront variant media.",
+            type: "url",
+            ownerType: "PRODUCTVARIANT",
+            pin: true,
+          },
+        }),
+      ]);
+
+      const prodRes = isDefCreatedOrExisting(prodJson?.data);
+      const varRes = isDefCreatedOrExisting(varJson?.data);
+
+      if (prodRes.ok && varRes.ok) {
         PINNED_METAFIELD_DEF_SHOPS.add(this.shop);
-        return { success: true, pinned: true, definitionId: createdId };
+        return {
+          success: true,
+          pinned: true,
+          definitionId: prodRes.id,
+          variantDefinitionId: varRes.id,
+        };
       }
     } catch {
       // Non-blocking best-effort definition registration
@@ -410,12 +465,65 @@ export class ShopifyVariantManager {
     return { success: true, pinned: true };
   }
 
+  private mapGraphQLProductNode(p: GraphQLProductNode): ProductSnapshot {
+    const mediaList: MediaItem[] = [];
+    for (const mEdge of p.media?.edges || []) {
+      if (mEdge.node.mediaContentType === "IMAGE" && mEdge.node.image) {
+        mediaList.push({
+          id: mEdge.node.id,
+          url: mEdge.node.image.url,
+          altText: mEdge.node.image.altText || "",
+        });
+      }
+    }
+
+    let parsedDualMeta: DualFeedMetadataRecord | undefined = undefined;
+    if (p.dualFeedMeta?.value) {
+      try {
+        parsedDualMeta = JSON.parse(p.dualFeedMeta.value) as DualFeedMetadataRecord;
+      } catch {
+        parsedDualMeta = undefined;
+      }
+    }
+
+    const variants: VariantMapping[] = [];
+    for (const vEdge of p.variants?.edges || []) {
+      const v = vEdge.node;
+      const vMedia = v.media?.edges?.[0]?.node;
+      const cleanAdImageUrl =
+        v.cleanAdImageMetafield?.value ||
+        parsedDualMeta?.variantCleanImageMap?.[v.id] ||
+        undefined;
+      variants.push({
+        variantId: v.id,
+        variantTitle: v.title,
+        originalMediaId: vMedia ? vMedia.id : "",
+        originalImageUrl: vMedia?.image?.url || (mediaList[0]?.url || ""),
+        cleanAdImageUrl,
+        sku: v.sku || "",
+        price: v.price || "",
+      });
+    }
+
+    return {
+      productId: p.id,
+      productTitle: p.title,
+      bodyHtml: p.descriptionHtml || "",
+      variants,
+      originalMediaList: mediaList,
+      capturedAt: new Date().toISOString(),
+      cleanAdImageUrl: p.cleanAdImageMetafield?.value || undefined,
+      dualFeedMetadata: parsedDualMeta,
+    };
+  }
+
   /**
    * Fetches product and variant hierarchy from Shopify GraphQL Admin API using cursor pagination.
    * If mock mode / token is not set, returns realistic sample data for local testing.
    */
   async fetchProductsWithVariants(maxProducts = 250): Promise<ProductSnapshot[]> {
     if (!this.accessToken || this.accessToken.startsWith("mock_")) {
+      await this.loadMockMetaFromR2();
       return this.getMockProducts();
     }
 
@@ -453,13 +561,17 @@ export class ShopifyVariantManager {
                   }
                 }
               }
-              variants(first: 50) {
+              variants(first: 100) {
                 edges {
                   node {
                     id
                     title
                     sku
                     price
+                    cleanAdImageMetafield: metafield(namespace: "safemedia", key: "clean_ad_image_url") {
+                      id
+                      value
+                    }
                     media(first: 1) {
                       edges {
                         node {
@@ -502,51 +614,7 @@ export class ShopifyVariantManager {
       const edges = connection?.edges || [];
 
       for (const edge of edges) {
-        const p = edge.node;
-        const mediaList: MediaItem[] = [];
-        for (const mEdge of p.media?.edges || []) {
-          if (mEdge.node.mediaContentType === "IMAGE" && mEdge.node.image) {
-            mediaList.push({
-              id: mEdge.node.id,
-              url: mEdge.node.image.url,
-              altText: mEdge.node.image.altText || "",
-            });
-          }
-        }
-
-        const variants: VariantMapping[] = [];
-        for (const vEdge of p.variants?.edges || []) {
-          const v = vEdge.node;
-          const vMedia = v.media?.edges?.[0]?.node;
-          variants.push({
-            variantId: v.id,
-            variantTitle: v.title,
-            originalMediaId: vMedia ? vMedia.id : "",
-            originalImageUrl: vMedia?.image?.url || (mediaList[0]?.url || ""),
-            sku: v.sku || "",
-            price: v.price || "",
-          });
-        }
-
-        let parsedDualMeta: ProductSnapshot["dualFeedMetadata"] = undefined;
-        if (p.dualFeedMeta?.value) {
-          try {
-            parsedDualMeta = JSON.parse(p.dualFeedMeta.value);
-          } catch {
-            parsedDualMeta = undefined;
-          }
-        }
-
-        products.push({
-          productId: p.id,
-          productTitle: p.title,
-          bodyHtml: p.descriptionHtml || "",
-          variants,
-          originalMediaList: mediaList,
-          capturedAt: new Date().toISOString(),
-          cleanAdImageUrl: p.cleanAdImageMetafield?.value || undefined,
-          dualFeedMetadata: parsedDualMeta,
-        });
+        products.push(this.mapGraphQLProductNode(edge.node));
       }
 
       hasNextPage = Boolean(connection?.pageInfo?.hasNextPage) && edges.length > 0;
@@ -600,13 +668,17 @@ export class ShopifyVariantManager {
               }
             }
           }
-          variants(first: 50) {
+          variants(first: 100) {
             edges {
               node {
                 id
                 title
                 sku
                 price
+                cleanAdImageMetafield: metafield(namespace: "safemedia", key: "clean_ad_image_url") {
+                  id
+                  value
+                }
                 media(first: 1) {
                   edges {
                     node {
@@ -631,51 +703,7 @@ export class ShopifyVariantManager {
       if (json.errors || !json.data?.product) {
         return null;
       }
-      const p = json.data.product;
-      const mediaList: MediaItem[] = [];
-      for (const mEdge of p.media?.edges || []) {
-        if (mEdge.node.mediaContentType === "IMAGE" && mEdge.node.image) {
-          mediaList.push({
-            id: mEdge.node.id,
-            url: mEdge.node.image.url,
-            altText: mEdge.node.image.altText || "",
-          });
-        }
-      }
-
-      const variants: VariantMapping[] = [];
-      for (const vEdge of p.variants?.edges || []) {
-        const v = vEdge.node;
-        const vMedia = v.media?.edges?.[0]?.node;
-        variants.push({
-          variantId: v.id,
-          variantTitle: v.title,
-          originalMediaId: vMedia ? vMedia.id : "",
-          originalImageUrl: vMedia?.image?.url || (mediaList[0]?.url || ""),
-          sku: v.sku || "",
-          price: v.price || "",
-        });
-      }
-
-      let parsedDualMeta: ProductSnapshot["dualFeedMetadata"] = undefined;
-      if (p.dualFeedMeta?.value) {
-        try {
-          parsedDualMeta = JSON.parse(p.dualFeedMeta.value);
-        } catch {
-          parsedDualMeta = undefined;
-        }
-      }
-
-      return {
-        productId: p.id,
-        productTitle: p.title,
-        bodyHtml: p.descriptionHtml || "",
-        originalMediaList: mediaList,
-        variants,
-        capturedAt: new Date().toISOString(),
-        cleanAdImageUrl: p.cleanAdImageMetafield?.value || undefined,
-        dualFeedMetadata: parsedDualMeta,
-      };
+      return this.mapGraphQLProductNode(json.data.product);
     } catch {
       return null;
     }
@@ -734,31 +762,42 @@ export class ShopifyVariantManager {
 
   /**
    * Priority 1 (Dual-Feed Smart Routing):
-   * Writes the AI-cleaned ad image URL and metadata into the product's hidden Metafields
-   * (`safemedia.clean_ad_image_url` and `safemedia.dual_feed_metadata`).
+   * Writes the AI-cleaned ad image URLs and metadata into both the parent product's
+   * and all cleaned variants' hidden Metafields (`safemedia.clean_ad_image_url` and
+   * `safemedia.dual_feed_metadata`), chunked to Shopify's 25-input metafieldsSet limit.
    */
   async setCleanAdImageMetafield(
     productId: string,
     cleanAdImageUrl: string,
-    metadata: {
-      sourceImageUrl: string;
-      shopifyImageUrl?: string;
-      cleanedAt: string;
-      maskCoveragePct?: number;
-      processingSec?: number;
-      engine?: string;
-    }
+    metadata: DualFeedMetadataRecord,
+    variantCleanImageMap?: Record<string, string>
   ): Promise<{ success: boolean; metafieldId?: string }> {
     const gid = productId.startsWith("gid://") ? productId : `gid://shopify/Product/${productId}`;
+    const effectiveVariantMap: Record<string, string> = {
+      ...(metadata.variantCleanImageMap || {}),
+      ...(variantCleanImageMap || {}),
+    };
+    const mergedMetadata: DualFeedMetadataRecord = {
+      ...metadata,
+      ...(Object.keys(effectiveVariantMap).length > 0
+        ? { variantCleanImageMap: effectiveVariantMap }
+        : {}),
+    };
 
     if (!this.accessToken || this.accessToken.startsWith("mock_")) {
+      await this.loadMockMetaFromR2();
       const shopMap = this.getShopMockMap();
       const existing = shopMap.get(gid) || {};
       shopMap.set(gid, {
         ...existing,
         cleanAdImageUrl,
-        dualFeedMetadata: metadata,
+        dualFeedMetadata: mergedMetadata,
+        variantCleanAdImageUrls: {
+          ...(existing.variantCleanAdImageUrls || {}),
+          ...effectiveVariantMap,
+        },
       });
+      await this.saveMockMetaToR2();
       return { success: true, metafieldId: "gid://shopify/Metafield/mock_1" };
     }
 
@@ -780,48 +819,180 @@ export class ShopifyVariantManager {
       }
     `;
 
-    const variables = {
-      metafields: [
-        {
-          ownerId: gid,
-          namespace: "safemedia",
-          key: "clean_ad_image_url",
-          type: "url",
-          value: cleanAdImageUrl,
-        },
-        {
-          ownerId: gid,
-          namespace: "safemedia",
-          key: "dual_feed_metadata",
-          type: "json",
-          value: JSON.stringify(metadata),
-        },
-      ],
-    };
+    const allInputs: Array<{
+      ownerId: string;
+      namespace: string;
+      key: string;
+      type: string;
+      value: string;
+    }> = [
+      {
+        ownerId: gid,
+        namespace: "safemedia",
+        key: "clean_ad_image_url",
+        type: "url",
+        value: cleanAdImageUrl,
+      },
+      {
+        ownerId: gid,
+        namespace: "safemedia",
+        key: "dual_feed_metadata",
+        type: "json",
+        value: JSON.stringify(mergedMetadata),
+      },
+    ];
 
-    // Execute Metafield Definition check and Metafield value update in parallel to save GraphQL round-trip time
-    const [, json] = await Promise.all([
-      this.ensureCleanAdMetafieldDefinition().catch(() => {}),
-      this.executeGraphQLWithBackoff<MetafieldsSetResponse>(mutation, variables, "2024-10"),
-    ]);
-    const userErrors = json.data?.metafieldsSet?.userErrors;
-    if (json.errors || (userErrors && userErrors.length > 0)) {
-      throw new Error(`Metafield update failed: ${JSON.stringify(json.errors || userErrors)}`);
+    for (const [vid, vUrl] of Object.entries(effectiveVariantMap)) {
+      if (!vUrl) continue;
+      const variantGid = vid.startsWith("gid://") ? vid : `gid://shopify/ProductVariant/${vid}`;
+      allInputs.push({
+        ownerId: variantGid,
+        namespace: "safemedia",
+        key: "clean_ad_image_url",
+        type: "url",
+        value: vUrl,
+      });
     }
 
-    const firstId = json.data?.metafieldsSet?.metafields?.[0]?.id;
+    const MAX_METAFIELDS_PER_SET = 25;
+    const chunks: typeof allInputs[] = [];
+    for (let i = 0; i < allInputs.length; i += MAX_METAFIELDS_PER_SET) {
+      chunks.push(allInputs.slice(i, i + MAX_METAFIELDS_PER_SET));
+    }
+
+    // Execute Metafield Definition check and first Metafield batch update in parallel to save GraphQL round-trip time
+    const [, firstJson] = await Promise.all([
+      this.ensureCleanAdMetafieldDefinition().catch(() => {}),
+      this.executeGraphQLWithBackoff<MetafieldsSetResponse>(
+        mutation,
+        { metafields: chunks[0] },
+        "2024-10"
+      ),
+    ]);
+    const firstErrors = firstJson.data?.metafieldsSet?.userErrors;
+    if (firstJson.errors || (firstErrors && firstErrors.length > 0)) {
+      throw new Error(`Metafield update failed: ${JSON.stringify(firstJson.errors || firstErrors)}`);
+    }
+
+    for (let i = 1; i < chunks.length; i++) {
+      const nextJson = await this.executeGraphQLWithBackoff<MetafieldsSetResponse>(
+        mutation,
+        { metafields: chunks[i] },
+        "2024-10"
+      );
+      const nextErrors = nextJson.data?.metafieldsSet?.userErrors;
+      if (nextJson.errors || (nextErrors && nextErrors.length > 0)) {
+        throw new Error(`Metafield update failed: ${JSON.stringify(nextJson.errors || nextErrors)}`);
+      }
+    }
+
+    const firstId = firstJson.data?.metafieldsSet?.metafields?.[0]?.id;
     return { success: true, metafieldId: firstId };
   }
 
+  private async deleteMetafieldIdentifiers(
+    identifiers: Array<{ ownerId: string; namespace: string; key: string }>,
+    contextLabel: string
+  ): Promise<{ success: boolean; deletedCount: number }> {
+    if (identifiers.length === 0) {
+      return { success: true, deletedCount: 0 };
+    }
+    const deleteMutation = `
+      mutation metafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
+        metafieldsDelete(metafields: $metafields) {
+          deletedMetafields {
+            ownerId
+            namespace
+            key
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    const MAX_METAFIELDS_PER_DELETE = 25;
+    let totalDeleted = 0;
+
+    for (let i = 0; i < identifiers.length; i += MAX_METAFIELDS_PER_DELETE) {
+      const chunk = identifiers.slice(i, i + MAX_METAFIELDS_PER_DELETE);
+      const json = await this.executeGraphQLWithBackoff<MetafieldsDeleteResponse>(
+        deleteMutation,
+        { metafields: chunk },
+        "2024-10"
+      );
+
+      const userErrors = json.data?.metafieldsDelete?.userErrors;
+      if (json.errors || (userErrors && userErrors.length > 0)) {
+        console.warn(
+          `[Shopify] metafieldsDelete returned errors for ${contextLabel}:`,
+          JSON.stringify(json.errors || userErrors)
+        );
+      }
+
+      totalDeleted += json.data?.metafieldsDelete?.deletedMetafields?.length ?? 0;
+    }
+
+    return { success: true, deletedCount: totalDeleted };
+  }
+
   /**
-   * Rollback Helper: Removes safemedia hidden metafields from product
+   * Removes safemedia.clean_ad_image_url metafields from specific variants (e.g., partial snapshot rollback).
+   */
+  async clearVariantCleanAdImageMetafields(
+    productId: string,
+    variantIds: string[]
+  ): Promise<{ success: boolean; deletedCount?: number }> {
+    const gid = productId.startsWith("gid://") ? productId : `gid://shopify/Product/${productId}`;
+    const uniqueVariantIds = Array.from(new Set(variantIds.filter(Boolean)));
+    if (uniqueVariantIds.length === 0) {
+      return { success: true, deletedCount: 0 };
+    }
+
+    if (!this.accessToken || this.accessToken.startsWith("mock_")) {
+      await this.loadMockMetaFromR2();
+      const shopMap = this.getShopMockMap();
+      const existing = shopMap.get(gid);
+      if (existing?.variantCleanAdImageUrls) {
+        const updatedVarMap = { ...existing.variantCleanAdImageUrls };
+        for (const vid of uniqueVariantIds) {
+          delete updatedVarMap[vid];
+        }
+        shopMap.set(gid, { ...existing, variantCleanAdImageUrls: updatedVarMap });
+        await this.saveMockMetaToR2();
+      }
+      return { success: true, deletedCount: uniqueVariantIds.length };
+    }
+
+    try {
+      const identifiers = uniqueVariantIds.map((vid) => ({
+        ownerId: vid.startsWith("gid://") ? vid : `gid://shopify/ProductVariant/${vid}`,
+        namespace: "safemedia",
+        key: "clean_ad_image_url",
+      }));
+      return await this.deleteMetafieldIdentifiers(identifiers, `${gid} variants`);
+    } catch (err: unknown) {
+      console.error(`[Shopify] Error in clearVariantCleanAdImageMetafields for ${gid}:`, err);
+      return { success: false, deletedCount: 0 };
+    }
+  }
+
+  /**
+   * Rollback Helper: Removes safemedia hidden metafields from product and its variants
    * when rolling back to a snapshot where no clean ad image existed.
    * Uses modern Shopify metafieldsDelete mutation (2024-10) with direct identifier inputs.
    */
-  async clearCleanAdImageMetafield(productId: string): Promise<{ success: boolean; deletedCount?: number }> {
+  async clearCleanAdImageMetafield(
+    productId: string,
+    variantIds?: string[]
+  ): Promise<{ success: boolean; deletedCount?: number }> {
     const gid = productId.startsWith("gid://") ? productId : `gid://shopify/Product/${productId}`;
+    const uniqueVariantIds = Array.from(new Set((variantIds || []).filter(Boolean)));
 
     if (!this.accessToken || this.accessToken.startsWith("mock_")) {
+      await this.loadMockMetaFromR2();
       const shopMap = this.getShopMockMap();
       const existing = shopMap.get(gid);
       if (existing) {
@@ -829,59 +1000,33 @@ export class ShopifyVariantManager {
           ...existing,
           cleanAdImageUrl: undefined,
           dualFeedMetadata: undefined,
+          variantCleanAdImageUrls: undefined,
         });
       }
-      return { success: true, deletedCount: 2 };
+      await this.saveMockMetaToR2();
+      return { success: true, deletedCount: 2 + uniqueVariantIds.length };
     }
 
     try {
-      const deleteMutation = `
-        mutation metafieldsDelete($metafields: [MetafieldIdentifierInput!]!) {
-          metafieldsDelete(metafields: $metafields) {
-            deletedMetafields {
-              ownerId
-              namespace
-              key
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
+      const identifiers = [
+        {
+          ownerId: gid,
+          namespace: "safemedia",
+          key: "clean_ad_image_url",
+        },
+        {
+          ownerId: gid,
+          namespace: "safemedia",
+          key: "dual_feed_metadata",
+        },
+        ...uniqueVariantIds.map((vid) => ({
+          ownerId: vid.startsWith("gid://") ? vid : `gid://shopify/ProductVariant/${vid}`,
+          namespace: "safemedia",
+          key: "clean_ad_image_url",
+        })),
+      ];
 
-      const variables = {
-        metafields: [
-          {
-            ownerId: gid,
-            namespace: "safemedia",
-            key: "clean_ad_image_url",
-          },
-          {
-            ownerId: gid,
-            namespace: "safemedia",
-            key: "dual_feed_metadata",
-          },
-        ],
-      };
-
-      const json = await this.executeGraphQLWithBackoff<MetafieldsDeleteResponse>(
-        deleteMutation,
-        variables,
-        "2024-10"
-      );
-
-      const userErrors = json.data?.metafieldsDelete?.userErrors;
-      if (json.errors || (userErrors && userErrors.length > 0)) {
-        console.warn(
-          `[Shopify] metafieldsDelete returned errors for ${gid}:`,
-          JSON.stringify(json.errors || userErrors)
-        );
-      }
-
-      const deletedCount = json.data?.metafieldsDelete?.deletedMetafields?.length ?? 0;
-      return { success: true, deletedCount };
+      return await this.deleteMetafieldIdentifiers(identifiers, gid);
     } catch (err: unknown) {
       console.error(`[Shopify] Error in clearCleanAdImageMetafield for ${gid}:`, err);
       return { success: false, deletedCount: 0 };
@@ -922,33 +1067,19 @@ export class ShopifyVariantManager {
       }
     `;
 
-    const checkRes = await fetch(`https://${this.shop}/admin/api/2024-10/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": this.accessToken,
-      },
-      body: JSON.stringify({ query: checkQuery }),
-    });
-    if (checkRes.status === 401) {
-      throw new ShopifyAuthError(this.shop, "Shopify authentication failed (401 Unauthorized) checking webhooks", 401);
-    }
     interface WebhookSubscriptionsQueryData {
-      data?: {
-        webhookSubscriptions?: {
-          edges?: Array<{
-            node?: {
-              id?: string;
-              endpoint?: {
-                callbackUrl?: string;
-              };
+      webhookSubscriptions?: {
+        edges?: Array<{
+          node?: {
+            id?: string;
+            endpoint?: {
+              callbackUrl?: string;
             };
-          }>;
-        };
+          };
+        }>;
       };
-      errors?: Array<{ message: string }>;
     }
-    const checkJson = (await checkRes.json()) as WebhookSubscriptionsQueryData;
+    const checkJson = await this.executeGraphQLWithBackoff<WebhookSubscriptionsQueryData>(checkQuery);
     const existing = checkJson.data?.webhookSubscriptions?.edges || [];
     for (const edge of existing) {
       if (edge.node?.endpoint?.callbackUrl === callbackUrl) {
@@ -977,43 +1108,25 @@ export class ShopifyVariantManager {
       }
     `;
 
-    const res = await fetch(`https://${this.shop}/admin/api/2024-10/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": this.accessToken,
-      },
-      body: JSON.stringify({
-        query: createMutation,
-        variables: {
-          topic: "PRODUCTS_UPDATE",
-          webhookSubscription: {
-            callbackUrl,
-            format: "JSON",
-          },
-        },
-      }),
-    });
-    if (res.status === 401) {
-      throw new ShopifyAuthError(this.shop, "Shopify authentication failed (401 Unauthorized) creating webhook", 401);
-    }
-
     interface WebhookSubscriptionCreateData {
-      data?: {
-        webhookSubscriptionCreate?: {
-          webhookSubscription?: {
-            id?: string;
-            topic?: string;
-          };
-          userErrors?: Array<{
-            field?: string[];
-            message?: string;
-          }>;
+      webhookSubscriptionCreate?: {
+        webhookSubscription?: {
+          id?: string;
+          topic?: string;
         };
+        userErrors?: Array<{
+          field?: string[];
+          message?: string;
+        }>;
       };
-      errors?: Array<{ message: string }>;
     }
-    const json = (await res.json()) as WebhookSubscriptionCreateData;
+    const json = await this.executeGraphQLWithBackoff<WebhookSubscriptionCreateData>(createMutation, {
+      topic: "PRODUCTS_UPDATE",
+      webhookSubscription: {
+        callbackUrl,
+        format: "JSON",
+      },
+    });
     const userErrors = json.data?.webhookSubscriptionCreate?.userErrors;
     if (json.errors || (userErrors && userErrors.length > 0)) {
       throw new Error(`Webhook registration failed: ${JSON.stringify(json.errors || userErrors)}`);
@@ -1059,33 +1172,19 @@ export class ShopifyVariantManager {
       }
     `;
 
-    const checkRes = await fetch(`https://${this.shop}/admin/api/2024-10/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": this.accessToken,
-      },
-      body: JSON.stringify({ query: checkQuery }),
-    });
-    if (checkRes.status === 401) {
-      throw new ShopifyAuthError(this.shop, "Shopify authentication failed (401 Unauthorized) checking webhooks", 401);
-    }
     interface WebhookSubscriptionsListQueryData {
-      data?: {
-        webhookSubscriptions?: {
-          edges?: Array<{
-            node?: {
-              id?: string;
-              endpoint?: {
-                callbackUrl?: string;
-              };
+      webhookSubscriptions?: {
+        edges?: Array<{
+          node?: {
+            id?: string;
+            endpoint?: {
+              callbackUrl?: string;
             };
-          }>;
-        };
+          };
+        }>;
       };
-      errors?: Array<{ message: string }>;
     }
-    const checkJson = (await checkRes.json()) as WebhookSubscriptionsListQueryData;
+    const checkJson = await this.executeGraphQLWithBackoff<WebhookSubscriptionsListQueryData>(checkQuery);
     const existing = checkJson.data?.webhookSubscriptions?.edges || [];
 
     const deleteMutation = `
@@ -1102,18 +1201,8 @@ export class ShopifyVariantManager {
 
     let deletedCount = 0;
     for (const edge of existing) {
-      if (edge.node?.endpoint?.callbackUrl === callbackUrl) {
-        await fetch(`https://${this.shop}/admin/api/2024-10/graphql.json`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": this.accessToken,
-          },
-          body: JSON.stringify({
-            query: deleteMutation,
-            variables: { id: edge.node.id },
-          }),
-        });
+      if (edge.node?.endpoint?.callbackUrl === callbackUrl && edge.node.id) {
+        await this.executeGraphQLWithBackoff(deleteMutation, { id: edge.node.id });
         deletedCount++;
       }
     }
@@ -1464,6 +1553,10 @@ export class ShopifyVariantManager {
         variants: p.variants.map((v) => ({
           ...v,
           originalMediaId: override.variantMediaIds?.[v.variantId] ?? v.originalMediaId,
+          cleanAdImageUrl:
+            override.variantCleanAdImageUrls?.[v.variantId] ??
+            override.dualFeedMetadata?.variantCleanImageMap?.[v.variantId] ??
+            v.cleanAdImageUrl,
         })),
       };
     });

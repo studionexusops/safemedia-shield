@@ -352,6 +352,31 @@ class TestTier2AbortAndCircuitBreakerBoundaries(unittest.TestCase):
         canary_res = self.client.post("/api/canary/test", json_data={"shop": PRIMARY_SHOP})
         self.assertEqual(canary_res.status_code, 200)
 
+    def test_abort_bound_06_cancel_discards_job_and_unblocks_canary_test(self):
+        """TC-T2-ABORT-BOUND-06: POST /api/batch/cancel discards batch job (CANCELLED), resets breaker, and immediately unblocks Canary Test without restarting batch."""
+        # 1. Start batch then trip circuit breaker (Abort)
+        self.client.post("/api/batch/start", json_data={"shop": PRIMARY_SHOP})
+        self.client.post("/api/batch/abort", json_data={"shop": PRIMARY_SHOP})
+
+        # 2. Canary test is blocked with 423
+        canary_blocked = self.client.post("/api/canary/test", json_data={"shop": PRIMARY_SHOP})
+        self.assertEqual(canary_blocked.status_code, 423)
+
+        # 3. Cancel batch (instead of Resume)
+        cancel_res = self.client.post("/api/batch/cancel", json_data={"shop": PRIMARY_SHOP})
+        self.assertEqual(cancel_res.status_code, 200)
+        self.assertFalse(cancel_res.json().get("circuitBreakerTripped"))
+        self.assertEqual(cancel_res.json().get("jobState", {}).get("status"), "CANCELLED")
+
+        # 4. Canary test is immediately unblocked and succeeds
+        canary_ok = self.client.post("/api/canary/test", json_data={"shop": PRIMARY_SHOP})
+        self.assertEqual(canary_ok.status_code, 200)
+
+        # 5. Store job status remains CANCELLED (not restarted into RUNNING)
+        status_res = self.client.get(f"/api/status?shop={PRIMARY_SHOP}")
+        self.assertEqual(status_res.status_code, 200)
+        self.assertEqual(status_res.json().get("jobState", {}).get("status"), "CANCELLED")
+
 
 class TestTier2RollbackBoundaries(unittest.TestCase):
     """Tier 2 - Scenario 7: Rollback Non-Existent Snapshot & Edge Conditions."""

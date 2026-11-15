@@ -7,6 +7,7 @@ export interface VariantMapping {
   variantTitle: string;
   originalMediaId: string;
   originalImageUrl: string;
+  cleanAdImageUrl?: string;
   sku?: string;
   price?: string;
 }
@@ -17,22 +18,27 @@ export interface MediaItem {
   altText?: string;
 }
 
+export interface DualFeedMetadataRecord {
+  sourceImageUrl?: string;
+  shopifyImageUrl?: string;
+  cleanedAt?: string;
+  maskCoveragePct?: number;
+  processingSec?: number;
+  engine?: string;
+  cleanedImageUrls?: Record<string, string>;
+  variantCleanImageMap?: Record<string, string>;
+}
+
 export interface ProductSnapshot {
   productId: string;
   productTitle: string;
+  title?: string;
   bodyHtml: string;
   variants: VariantMapping[];
   originalMediaList: MediaItem[];
   capturedAt: string;
   cleanAdImageUrl?: string;
-  dualFeedMetadata?: {
-    sourceImageUrl?: string;
-    shopifyImageUrl?: string;
-    cleanedAt?: string;
-    maskCoveragePct?: number;
-    processingSec?: number;
-    engine?: string;
-  };
+  dualFeedMetadata?: DualFeedMetadataRecord;
 }
 
 export interface StoreSnapshot {
@@ -50,10 +56,18 @@ export interface CanaryVariantCheck {
   title: string;
   hasOriginalMedia: boolean;
   preserved: boolean;
+  originalImageUrl?: string;
+  cleanAdImageUrl?: string;
 
   // Backwards compatibility aliases for existing UI before M2
   variantTitle?: string;
   activeImageUrl?: string;
+}
+
+export interface SanitizedErrorResponse {
+  error: string;
+  code: string;
+  details?: string;
 }
 
 export interface CanaryTestResult {
@@ -108,11 +122,12 @@ export interface DualFeedSyncResult {
 export interface BatchJobState {
   jobId: string;
   shop?: string;
-  status: "IDLE" | "RUNNING" | "COMPLETED" | "ABORTED" | "FAILED";
+  status: "IDLE" | "RUNNING" | "COMPLETED" | "ABORTED" | "CANCELLED" | "FAILED";
   total: number;
   processed: number;
   skippedCount?: number;
   cleanedCount?: number;
+  cleanedProductIds?: string[];
   currentProductId?: string;
   currentProductTitle?: string;
   avgProcessingSec?: number;
@@ -187,6 +202,8 @@ export interface RollbackProductDataDiff {
     gmcImageLink: string;
     metaImageLink: string;
     variantCount: number;
+    cleanedVariantCount?: number;
+    variantCleanImageMap?: Record<string, string>;
     variantLinksPreserved: boolean;
   };
   afterRevert: {
@@ -196,8 +213,11 @@ export interface RollbackProductDataDiff {
     metaImageLink: string;
     metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN";
     variantCount: number;
+    cleanedVariantCount?: number;
+    variantCleanImageMap?: Record<string, string>;
     variantLinksPreserved: boolean;
   };
+  clearedAfterRollback?: boolean;
 }
 
 export interface RollbackExecutionResult {
@@ -231,32 +251,36 @@ export interface AdFeedPreviewResponse {
   metafieldDefinitionPinned: boolean;
   channelMappings: {
     googleShopping: {
-      channelApp: "Google & YouTube Channel / Google Merchant Center";
+      channelApp: string;
       targetAttribute: "g:image_link";
       sourceMetafield: "product.metafields.safemedia.clean_ad_image_url";
-      status: "MAPPED_AND_READY";
+      status: "MAPPED_AND_READY" | "READY_WAITING_CLEAN_ITEMS";
     };
     metaCatalog: {
-      channelApp: "Facebook & Instagram Channel / Meta Commerce Manager";
+      channelApp: string;
       targetAttribute: "image_link";
       sourceMetafield: "product.metafields.safemedia.clean_ad_image_url";
-      status: "MAPPED_AND_READY";
+      status: "MAPPED_AND_READY" | "READY_WAITING_CLEAN_ITEMS";
     };
   };
   items: Array<{
     productId: string;
+    variantId?: string;
+    variantTitle?: string;
     productTitle: string;
     storefrontUrl: string;
     storefrontImageUrl: string;
     cleanAdImageUrl: string | null;
     googleShoppingFeedItem: {
       "g:id": string;
+      "g:item_group_id"?: string;
       "g:title": string;
       "g:image_link": string;
       "storefront_original_preserved": string;
     };
     metaCatalogFeedItem: {
       "id": string;
+      "item_group_id"?: string;
       "title": string;
       "image_link": string;
     };

@@ -55,6 +55,8 @@ const planBadgeText = "";
 const planDescText = "";
 const planUsageBadgeClass = "";
 const planUsageBadgeText = "";
+const canaryQuotaDisplayClass = "";
+const canaryQuotaDisplayText = "";
 const showTrialBtn = false;
 const showResumeBtn = false;
 

@@ -59,6 +59,10 @@ class TestStep3RetentionAndBillingGate(unittest.TestCase):
         self.assertIn("async listSnapshots()", content)
         self.assertIn("Virgin Baseline", content)
 
+        # Ensure listSnapshots includes customMetadata and falls back cleanly for all snapshots
+        self.assertIn('"customMetadata"', content, "listSnapshots must include customMetadata to fetch totalProducts")
+        self.assertIn("if (totalProducts === 0)", content, "Fallback must apply to all snapshots when metadata is missing")
+
         # Check rollback target resolution allows baseline & latest
         self.assertIn('cleanSnapshotId === "baseline"', content)
         self.assertIn('cleanSnapshotId === "latest"', content)

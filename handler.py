@@ -10,19 +10,26 @@ Supports:
 
 import io
 import os
+import ssl
 import time
 import base64
+import hashlib
+import http.client
 import ipaddress
+import logging
 import socket
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 from unittest.mock import patch
 
 import numpy as np
 import cv2
 import torch
 from PIL import Image, ImageDraw, ImageOps
+
+Image.MAX_IMAGE_PIXELS = 16_000_000
+MAX_IMAGE_DIMENSION = 4096
 
 try:
     import runpod
@@ -33,9 +40,14 @@ from transformers import AutoProcessor, AutoModelForCausalLM
 from transformers.dynamic_module_utils import get_imports
 
 LAMA_MODEL_URL = "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt"
+LAMA_MODEL_SHA256 = os.environ.get("LAMA_MODEL_SHA256", "")
 MODEL_DIR = os.environ.get("MODEL_DIR", "./models")
 LAMA_MODEL_PATH = os.path.join(MODEL_DIR, "big-lama.pt")
 FLORENCE_MODEL_ID = os.environ.get("FLORENCE_MODEL_ID", "microsoft/Florence-2-base")
+FLORENCE_MODEL_REVISION = os.environ.get("FLORENCE_MODEL_REVISION", "")
+ALLOW_RUNTIME_MODEL_DOWNLOAD = os.environ.get("ALLOW_RUNTIME_MODEL_DOWNLOAD", "false").lower() == "true"
+
+logger = logging.getLogger(__name__)
 
 
 def fixed_get_imports(filename):
@@ -53,37 +65,59 @@ def get_device() -> str:
     return "cpu"
 
 
+def _verify_file_sha256(file_path: str, expected_hex: str) -> None:
+    hasher = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    actual_hex = hasher.hexdigest().lower()
+    if actual_hex != expected_hex.strip().lower():
+        raise RuntimeError("LaMa model integrity verification failed (SHA-256 mismatch).")
+
+
 def ensure_lama_model() -> str:
     os.makedirs(MODEL_DIR, exist_ok=True)
     if not os.path.exists(LAMA_MODEL_PATH):
+        if not ALLOW_RUNTIME_MODEL_DOWNLOAD:
+            raise RuntimeError(
+                f"LaMa model not found at {LAMA_MODEL_PATH} and ALLOW_RUNTIME_MODEL_DOWNLOAD is disabled."
+            )
         urllib.request.urlretrieve(LAMA_MODEL_URL, LAMA_MODEL_PATH)
+    if LAMA_MODEL_SHA256:
+        _verify_file_sha256(LAMA_MODEL_PATH, LAMA_MODEL_SHA256)
     return LAMA_MODEL_PATH
 
 
 class SafeMediaInpaintEngine:
     def __init__(self):
         self.device = get_device()
+        hf_kwargs: Dict[str, Any] = {"trust_remote_code": True}
+        if FLORENCE_MODEL_REVISION:
+            hf_kwargs["revision"] = FLORENCE_MODEL_REVISION
+
         with patch("transformers.dynamic_module_utils.get_imports", fixed_get_imports):
             try:
                 self.florence_processor = AutoProcessor.from_pretrained(
-                    FLORENCE_MODEL_ID, trust_remote_code=True, local_files_only=True
+                    FLORENCE_MODEL_ID, local_files_only=True, **hf_kwargs
                 )
                 self.florence_model = AutoModelForCausalLM.from_pretrained(
                     FLORENCE_MODEL_ID,
-                    trust_remote_code=True,
                     torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
                     attn_implementation="sdpa",
                     local_files_only=True,
+                    **hf_kwargs,
                 ).to(self.device).eval()
             except Exception:
+                if not ALLOW_RUNTIME_MODEL_DOWNLOAD:
+                    raise
                 self.florence_processor = AutoProcessor.from_pretrained(
-                    FLORENCE_MODEL_ID, trust_remote_code=True
+                    FLORENCE_MODEL_ID, **hf_kwargs
                 )
                 self.florence_model = AutoModelForCausalLM.from_pretrained(
                     FLORENCE_MODEL_ID,
-                    trust_remote_code=True,
                     torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
                     attn_implementation="sdpa",
+                    **hf_kwargs,
                 ).to(self.device).eval()
 
         lama_path = ensure_lama_model()
@@ -249,14 +283,33 @@ def get_engine() -> SafeMediaInpaintEngine:
 
 
 MAX_IMAGE_BYTES = 20 * 1024 * 1024  # 20 MB
+MAX_BASE64_CHARS = (MAX_IMAGE_BYTES * 4 // 3) + 4
+ALLOWED_DATA_URI_PREFIXES = (
+    "data:image/jpeg;base64,",
+    "data:image/jpg;base64,",
+    "data:image/png;base64,",
+    "data:image/webp;base64,",
+    "data:image/gif;base64,",
+)
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise ValueError("HTTP redirects are prohibited for SSRF protection.")
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connects directly to a validated public IP while preserving hostname for TLS SNI/certificate checks."""
+
+    def __init__(self, host: str, port: int, pinned_ip: str, timeout: float = 15.0) -> None:
+        super().__init__(host=host, port=port, timeout=timeout, context=ssl.create_default_context())
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        raw_sock = socket.create_connection((self._pinned_ip, self.port), self.timeout, self.source_address)
+        try:
+            self.sock = self._context.wrap_socket(raw_sock, server_hostname=self.host)
+        except Exception:
+            raw_sock.close()
+            raise
 
 
-def _validate_public_https_url(url: str) -> None:
+def _validate_public_https_url(url: str) -> Tuple[urllib.parse.ParseResult, str]:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         raise ValueError("Only valid https:// image URLs are allowed.")
@@ -278,35 +331,69 @@ def _validate_public_https_url(url: str) -> None:
     except Exception as e:
         raise ValueError(f"DNS resolution failed for hostname '{parsed.hostname}': {e}")
 
+    pinned_ip: Optional[str] = None
     for res in addr_info:
         ip_str = res[4][0]
         ip = ipaddress.ip_address(ip_str)
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
             raise ValueError(f"Blocked non-public IP address: {ip}")
+        if pinned_ip is None:
+            pinned_ip = ip_str
+
+    if not pinned_ip:
+        raise ValueError(f"No public IP resolved for hostname '{parsed.hostname}'")
+    return parsed, pinned_ip
 
 
 def fetch_image_bytes(image_source: str) -> bytes:
     if image_source.startswith("data:") and ";base64," in image_source:
+        lower_prefix = image_source[:64].lower()
+        if not any(lower_prefix.startswith(p) for p in ALLOWED_DATA_URI_PREFIXES):
+            raise ValueError("Unsupported data URI image MIME type; allowed: jpeg, png, webp, gif.")
         _, base64_data = image_source.split(";base64,", 1)
+        if len(base64_data) > MAX_BASE64_CHARS:
+            raise ValueError(f"Image payload exceeds maximum limit of {MAX_IMAGE_BYTES} bytes.")
         data = base64.b64decode(base64_data)
         if len(data) > MAX_IMAGE_BYTES:
             raise ValueError(f"Image payload exceeds maximum limit of {MAX_IMAGE_BYTES} bytes.")
         return data
     elif image_source.startswith("https://"):
-        _validate_public_https_url(image_source)
-        opener = urllib.request.build_opener(_NoRedirectHandler())
-        req = urllib.request.Request(
-            image_source,
-            headers={"User-Agent": "SafeMediaShield-RunPod/1.0"},
+        parsed, pinned_ip = _validate_public_https_url(image_source)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        conn = _PinnedHTTPSConnection(
+            host=parsed.hostname or "",
+            port=parsed.port or 443,
+            pinned_ip=pinned_ip,
+            timeout=15.0,
         )
-        with opener.open(req, timeout=15) as response:
+        try:
+            conn.request(
+                "GET",
+                path,
+                headers={
+                    "Host": parsed.netloc,
+                    "User-Agent": "SafeMediaShield-RunPod/1.0",
+                    "Accept": "image/*,*/*;q=0.8",
+                },
+            )
+            response = conn.getresponse()
+            if 300 <= response.status < 400:
+                raise ValueError("HTTP redirects are prohibited for SSRF protection.")
+            if response.status < 200 or response.status >= 300:
+                raise ValueError(f"Upstream image fetch failed with HTTP {response.status}")
             data = response.read(MAX_IMAGE_BYTES + 1)
             if len(data) > MAX_IMAGE_BYTES:
                 raise ValueError(f"Image payload exceeds maximum limit of {MAX_IMAGE_BYTES} bytes.")
             return data
+        finally:
+            conn.close()
     elif image_source.startswith("http://"):
         raise ValueError("Insecure 'http://' URLs are not permitted. Use 'https://'.")
     else:
+        if len(image_source) > MAX_BASE64_CHARS:
+            raise ValueError(f"Image payload exceeds maximum limit of {MAX_IMAGE_BYTES} bytes.")
         data = base64.b64decode(image_source)
         if len(data) > MAX_IMAGE_BYTES:
             raise ValueError(f"Image payload exceeds maximum limit of {MAX_IMAGE_BYTES} bytes.")
@@ -329,6 +416,8 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
             img = ImageOps.exif_transpose(img)
         except Exception:
             pass
+        if img.width > MAX_IMAGE_DIMENSION or img.height > MAX_IMAGE_DIMENSION:
+            img.thumbnail((MAX_IMAGE_DIMENSION, MAX_IMAGE_DIMENSION), Image.Resampling.LANCZOS)
         img_rgb = img.convert("RGB")
 
         if task == "inpaint_clean":
@@ -359,9 +448,15 @@ def handler(job: Dict[str, Any]) -> Dict[str, Any]:
             "status": "error",
             "message": f"Unsupported task: '{task}'. Only 'inpaint_clean' is supported.",
         }
-    except Exception as e:
-        import traceback
-        return {"status": "error", "message": f"{e}\n{traceback.format_exc()}"}
+    except ValueError as e:
+        logger.warning("RunPod job rejected due to validation error: %s", e)
+        return {"status": "error", "message": f"Invalid input image or parameters: {e}"}
+    except Image.DecompressionBombError:
+        logger.warning("RunPod job rejected: decompression bomb pixel threshold exceeded.")
+        return {"status": "error", "message": "Image resolution exceeds safe processing limits."}
+    except Exception:
+        logger.exception("RunPod inference job failed unexpectedly.")
+        return {"status": "error", "message": "Inference processing failed."}
 
 
 if __name__ == "__main__":

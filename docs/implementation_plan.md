@@ -1,113 +1,183 @@
-# Phase 1: Architecture & Implementation Plan — AdFeed Clean: Google Shopping
+# Phase 1: Architecture & Implementation Plan — Full Variant Image AI Cleanup (AdFeed Clean: Google Shopping)
 
-> **対象プロジェクト**: AdFeed Clean: Google Shopping (旧称: SafeMedia Shield / AdFeed Clean: Google Ad Shield) for Shopify  
-> **工程**: Phase 1 — Architecture（要件定義・全体設計・審査要件 4.5.3 アーキテクチャ定義）  
-> **マスター設計書**: [`docs/SYSTEM_DESIGN.md`](file:///Users/yusuke/antigravity/Micro-SaaS/docs/SYSTEM_DESIGN.md#L1-L45) (v2.5.0 同期更新済)
+> **対象プロジェクト**: AdFeed Clean: Google Shopping (開発コードネーム: AdFeed Clean: Google Ad Shield / 旧称: SafeMedia Shield) for Shopify  
+> **工程**: Phase 1 — Architecture（全バリアント画像AIクリーンアップ拡張・要件定義・全体設計・審査要件 4.5.3 アーキテクチャ定義）  
+> **マスター設計書**: [`docs/SYSTEM_DESIGN.md`](file:///Users/yusuke/antigravity/Micro-SaaS/docs/SYSTEM_DESIGN.md#L1-L45) (v2.6.0 同期更新済)
 
 ---
 
 ## 1. 目的と解決する課題 (Why)
 
-### 1.1 コアコンセプトと顧客ペインの解決
-Shopifyマーチャントが直面する「自社ストアのCVRを高めるセール帯・バッジ付き画像」と「Google Merchant Center (GMC) / Meta広告カタログのプロモーション重畳禁止ポリシー（違反時は商品不承認・アカウントBAN）」の二律背反を、**手作業ゼロ（Zero-UI）・完全非破壊（Fail-Safe）**で解決します。
+### 1.1 背景と解決する構造的リスク（バリアント画像のGoogle広告不承認対策）
+Google Merchant Center (GMC) および Meta Catalog の画像ポリシー（プロモーションテキスト・セール帯・透かしの重畳禁止）は、商品の代表画像だけでなく、**各バリアント（色・サイズ違い等）に紐づく固有画像（`g:image_link`）すべてに等しく適用**されます。
 
-- **Pure Dual-Feed Smart Routing**:
-  - **自社オンラインストア (`Storefront`)**: マーチャントがアップロードした元の装飾・バッジ付き画像（`product.featured_media`）には1ピクセルも触れず、100%そのまま維持します。
-  - **広告フィード (`Google Shopping / Meta Catalog`)**: Webhook（`products/update`）または一括同期により、RunPod Serverless GPU（Florence-2 OCR + Big-LaMa Inpainting）でプロモーション帯・テキストを自動消去したクリーン画像を生成し、Cloudflare R2から高速配信されるURLをShopify Product Metafield（`safemedia.clean_ad_image_url`）へ格納します。
-- **Fail-Safe & 1-Click Time Machine Rollback**:
-  - 処理前の全商品メディアURL・バリアント紐付け（`MediaImage` ID）・メタフィールド状態をCloudflare R2に世代管理スナップショットとしてイミュータブル保存し、ワンクリック（10秒以内）で完全復元します。
+従来の仕様では「商品の代表画像（1枚目: `originalMediaList[0]`）のみ」をAIクリーンアップの対象としていたため、マーチャントが各バリアント画像（例: `Sunset Orange`, `Arctic Blue`, `Stealth Black`）にも個別に「SALE」「50% OFF」「送料無料」等の帯を合成している場合、バリアント側の広告審査が不承認（Disapproved）となるリスクが残っていました。
 
-### 1.2 定量ゴール・キルスイッチ基準と達成状況
-| 指標項目 | キルスイッチ上限基準 | 設計・実機達成値 | 根拠モジュール |
+本設計（Phase 1）では、以下の**3大画像処理パイプラインすべてにおいて「親代表画像 ＋ 全バリアント固有画像」をAIクリーンアップの対象へ拡張**し、ストアフロント非破壊（Fail-Safe）と原価・クォータ防衛を維持したまま、全バリアントの広告審査通過を100%保証します。
+
+1. **Step 1 カナリアプレビュー (`POST /api/canary/test`)**: 選択商品の代表画像＋全バリアント固有画像をAIクリーンアップし、UIのバリアント切替ピル（`.variant-pill`）で各バリアントの Before（帯あり）と After（帯消去済）をリアルタイム比較可能にする。
+2. **Step 2 カタログ一括バッチ (`POST /api/batch/start` & `BatchRunner`)**: ストア内全商品の代表画像＋全バリアント固有画像を重複排除・チャンク分割して非同期クリーンアップする。
+3. **Zone 1 Webhook自動同期 (`POST /webhooks/products/update` & `POST /webhooks/runpod/callback`)**: 商品保存・バリアント画像追加時に、未処理のバリアント画像を自動検出してバックグラウンドでAIクリーンアップする。
+
+### 1.2 定量ゴール・キルスイッチ基準と設計保証値
+| 指標項目 | キルスイッチ上限基準 | 設計・実機保証値 | 根拠モジュール・設計機構 |
 | :--- | :--- | :--- | :--- |
-| **① 画像処理原価** | `3.00 円/枚` 以下 | **約 `0.28 円/枚`** (`$0.0019/img`) | [`runpod_client.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/runpod_client.ts#L1-L120) / [`handler.py`](file:///Users/yusuke/antigravity/Micro-SaaS/handler.py#L1-L120) |
-| **② AI推論・E2E処理時間** | `15.0 秒/枚` 以下 | **平均 `4.75 秒/枚`** (`4.11s〜5.41s`) | [`verify_inpainting_pipeline.py`](file:///Users/yusuke/antigravity/Micro-SaaS/verify_inpainting_pipeline.py#L1-L80) |
-| **③ バリアント紐付け喪失率** | `0.0 %` (完全保持) | **`0.0 %`** (`productVariantsBulkUpdate` 保証) | [`shopify.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts#L158-L203) |
-| **④ 無料枠・課金防衛** | 未課金時の無限GPU消費防止 | **5件ハードキャップ** (Anti-TOCTOU予約) + **50枚トライアルキャップ** + **月額 `$65` (14日無料トライアル)** | [`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L1550-L1605) |
-
-> [!IMPORTANT]
-> **既存資産とのギャップ分析と Phase 1 更新ポイント（Shopify App Review 4.5.3 完全準拠）**
-> 既存コードベース（[`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts), [`shopify.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts), [`snapshot.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/snapshot.ts), [`ui.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/ui.ts)）は基盤・セキュリティ・基本UIが構築済みですが、**Shopify App Review 審査要件 `4.5.3`（E2Eデモ動画・データ変化の視覚的証明）**を完全に満たすため、以下のアーキテクチャ拡張を定義・設計します：
-> 1. **Metafield Definition 自動ピン留め & 広告フィード（Google Shopping `g:image_link` / Meta `image_link`）マッピング検証API (`GET /api/feed-preview`, `GET /api/feed-preview.xml`)** の追加設計。
-> 2. **1クリック・ロールバック (`POST /api/rollback`) における `Before Revert` vs. `After Revert` 商品データ差分 (`RollbackProductDataDiff[]`) 返却スキーマ**の拡張設計。
-> 3. **英語デフォルト・`alert()`/`confirm()` 非依存のインライン審査証跡UI**（Step-by-Step フィードマッピングガイド、Storefront vs. Ad-Feed 並列証明UI、Rollback Before/After 商品データ比較テーブル）の設計。
+| **① 画像処理原価** | `3.00 円/枚` 以下 | **約 `0.28〜0.43 円/枚`** (`$0.0019/img`) | URL単位の重複排除（`uniqueImageUrls`）により同一画像を共有する複数バリアントの二重推論を100%排除 ([`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L1604-L1685)) |
+| **② AI推論・E2E処理時間** | `15.0 秒/枚` 以下 | **平均 `4.75 秒/枚`** (商品内並列推論で複数バリアントも `≦ 10秒`) | カナリア・チャンク内でのユニーク画像並列推論（最大3並列）＋ RunPod コールバック分離 ([`runpod_client.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/runpod_client.ts#L1-L120)) |
+| **③ バリアント紐付け喪失率** | `0.0 %` (完全保持) | **`0.0 %`** (`productVariantsBulkUpdate` 保証) | 既存の `MediaImage` ID 保護に加え、バリアント単位のクリーン画像マッピングを保持 ([`shopify.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts#L458-L575)) |
+| **④ 無料枠・課金防衛** | 未課金時の無限GPU消費防止 | **カナリア5回上限** (1回最大5ユニーク画像) + **50枚トライアルキャップ** + **月額 `$65` (500枚内包)** | `trialUsedCount` / `monthlyUsageCount` を「新規AI推論したユニーク画像枚数」と1:1連動 ([`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L1550-L1665)) |
 
 ---
 
-## 2. システム全体アーキテクチャ & 技術スタック (Strict Stack Enforcement)
+## 2. コアアーキテクチャ設計（重複排除・二重レベルMetafield・クォータ制御）
 
-### 2.1 厳選技術スタックとスコープ外境界 (Out-of-Scope Boundaries)
-- **採用技術スタック**:
-  - **API Gateway / Backend**: Cloudflare Workers ([`cloudflare_worker/src/index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts))
-  - **Immutable Storage**: Cloudflare R2 (`SNAPSHOT_BUCKET`: `safemedia-snapshots`)
-  - **AI Inference Backend**: RunPod Serverless GPU (`Florence-2-base` OCR + `Big-LaMa` Inpainting, [`runpod_worker/handler.py`](file:///Users/yusuke/antigravity/Micro-SaaS/runpod_worker/handler.py#L1-L100))
-  - **Shopify Integration**: Shopify Webhooks (`PRODUCTS_UPDATE` + GDPR必須Webhook) & Shopify GraphQL Admin API (`2024-10` 統一)
-  - **Frontend UI**: Shopify App Bridge 統合・Polaris準拠ダッシュボード ([`cloudflare_worker/src/ui.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/ui.ts))
-- **スコープ外（実装禁止事項の厳守）**:
-  - ❌ **独自のユーザー認証DB**: パスワード認証や外部DBは一切持たず、Shopify OAuth 2.0 および Session Token 検証に100%依存。
-  - ❌ **独自の外部課金処理**: Stripe等は一切使用せず、Shopify Managed Billing API (`appSubscriptionCreate`) に100%委任。
-  - ❌ **元画像の破壊的直接上書き**: Shopify上のオリジナル商品画像（`MediaImage`）を上書き・削除する処理は一切行わない。
+### 2.1 画像URL重複排除（Image-URL Deduplication）と差分抽出アルゴリズム
+アパレルやギア商品では「15バリアント（5サイズ × 3カラー）存在するが、実質的な商品画像はカラー別の3枚のみ」という構成が一般的です。バリアント配列を単純ループしてAI推論を行うと、同じ画像を5回重複推論してGPU原価とマーチャントのクォータ（50枚枠/500枚枠）を浪費します。
+
+これを防ぐため、全パイプライン共通で以下の **「ユニーク画像集合の正規化（Deduplication）➔ 一括/並列推論 ➔ バリアントへのファンアウト（Fan-out）割当」** アルゴリズムを採用します。
+
+```mermaid
+flowchart LR
+    subgraph Input["1. 商品・バリアント画像入力"]
+        P_IMG["親代表画像 (originalMediaList[0])<br/>url_orange_sale.jpg"]
+        V1["Variant 1 (152cm Orange)<br/>url_orange_sale.jpg"]
+        V2["Variant 2 (156cm Orange)<br/>url_orange_sale.jpg"]
+        V3["Variant 3 (156cm Blue)<br/>url_blue_50off.jpg"]
+        V4["Variant 4 (160cm Black)<br/>url_black_freeship.jpg"]
+    end
+
+    subgraph Dedup["2. URL重複排除 & 差分判定"]
+        SET["uniqueImageUrls (Set)<br/>1. url_orange_sale.jpg<br/>2. url_blue_50off.jpg<br/>3. url_black_freeship.jpg"]
+    end
+
+    subgraph GPU["3. RunPod AI推論 (ユニーク枚数のみ)"]
+        CLEAN_MAP["cleanedImageUrls Map<br/>url_orange ➔ clean_orange.jpg<br/>url_blue ➔ clean_blue.jpg<br/>url_black ➔ clean_black.jpg"]
+    end
+
+    subgraph FanOut["4. メタフィールド & フィード割当"]
+        M_PROD["Product Metafield<br/>clean_orange.jpg"]
+        M_V1["Variant 1 & 2 Metafield<br/>clean_orange.jpg"]
+        M_V3["Variant 3 Metafield<br/>clean_blue.jpg"]
+        M_V4["Variant 4 Metafield<br/>clean_black.jpg"]
+    end
+
+    P_IMG & V1 & V2 & V3 & V4 --> SET
+    SET -->|"未処理の3枚のみ推論<br/>(クォータ消費: 3枚)"| CLEAN_MAP
+    CLEAN_MAP --> M_PROD & M_V1 & M_V3 & M_V4
+```
+
+### 2.2 Shopify 二重レベル隠しメタフィールド設計（Product & ProductVariant Metafields）
+Shopify Admin 上での視認性（審査要件 4.5.3）と外部フィードツール・補助フィード連携の双方を満たすため、親商品（`PRODUCT`）と各バリアント（`PRODUCTVARIANT`）の両方に `safemedia.clean_ad_image_url` を定義・格納します。
+
+| 対象オーナー (`ownerType`) | 名前空間 (`namespace`) | キー (`key`) | 型 (`type`) | ピン留め (`pin`) | 格納内容と役割 |
+| :--- | :--- | :--- | :---: | :---: | :--- |
+| **`PRODUCT`** | `safemedia` | `clean_ad_image_url` | `url` | `true` | 商品の代表（1枚目）クリーン画像URL。単一バリアント商品および親代表フィード属性のマッピング元。 |
+| **`PRODUCTVARIANT`** | `safemedia` | `clean_ad_image_url` | `url` | `true` | **【新規追加】** 各バリアント固有のクリーン画像URL。バリアント別 `g:image_link` のマッピング元。 |
+| **`PRODUCT`** | `safemedia` | `dual_feed_metadata` | `json` | `false` | 監査テレメトリに加え、`cleanedImageUrls: Record<originalUrl, cleanUrl>` および `variantCleanImageMap: Record<variantId, cleanUrl>` を保持（差分判定・高速フィード生成用）。 |
+
+- **アトミック一括書き込み (`metafieldsSet`)**:
+  Shopify GraphQL API (`2024-10`) の `metafieldsSet` ミューテーションは、1回のリクエストで最大25件の異なる `ownerId`（`gid://shopify/Product/...` および複数の `gid://shopify/ProductVariant/...`）を同時に更新可能です。これにより、APIレートリミットを消費せず1回のGraphQL呼び出しで親商品＋全バリアントのメタフィールドを一括保存します（25バリアント超の商品は25件単位でチャンク分割）。
+
+### 2.3 クォータ・課金カウント基準と Denial-of-Wallet 防御
+| 状態 / パイプライン | カウント対象カウンタ | マルチバリアント対応後のカウント・制限ルール |
+| :--- | :--- | :--- |
+| **Step 1 カナリアテスト**<br>(`POST /api/canary/test`) | `canaryUsedCount`<br>(上限: `5回`) | ・**1商品のカナリアテスト実行につき `canaryUsedCount += 1`**（トライアル本枠 `trialUsedCount` は非消費）。<br>・1回のテストで推論するユニーク画像数は最大 **`MAX_CANARY_UNIQUE_IMAGES = 5` 枚** に制限（Denial-of-Wallet 防御）。対象商品の全バリアント（最大5ユニーク画像）を一括クリーンアップしてピル切替で検証可能にする。 |
+| **14日間無料トライアル**<br>(`TRIAL_14D_ACTIVE`) | `trialUsedCount`<br>(上限: `50枚`) | ・バッチおよびWebhookで**実際に新規AI推論したユニーク画像枚数**を `+1/枚` 計上（既に同じ元画像URLがクリーン済みのバリアントは `0消費`）。<br>・商品処理中に `50/50` に到達した場合は、その時点で即座に `TRIAL_CAP_REACHED`（HTTP `402`）へ遷移して残りの未処理画像を停止。 |
+| **本契約プラン**<br>(`ACTIVE`: `$65/mo`) | `monthlyUsageCount`<br>(内包: `500枚/月`) | ・**新規AI推論したユニーク画像枚数**を `+1/枚` 計上。500枚超過時は推論実行前に1枚あたり `$0.05 USD` の `appUsageRecordCreate`（Pre-Flight Charge）を実行。 |
 
 ---
 
-## 3. Cloudflare Workers ルーティング設計
+## 3. Cloudflare Workers ルーティング設計 & 変更仕様
 
 実装エントリポイント: [`cloudflare_worker/src/index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts)
 
-| カテゴリ | HTTPメソッド & パス | 認証・検証方式 | 責務・レスポンス概要 |
+| カテゴリ | HTTPメソッド & パス | 認証・検証方式 | 全バリアント対応における責務・拡張内容 |
 | :--- | :--- | :--- | :--- |
-| **UI / 静的配信** | `GET /` | Shopify Session Token / OAuth Redirect | App Bridge 統合管理ダッシュボードHTML（英語デフォルト、日英切替対応）を返却。 |
-| **公開CDN配信** | `GET /clean-media/:shop/:filename` | Public GET (ドメイン正規表現 & パストラバーサル防止) | R2 `clean_images/{shop}/{filename}` からAIクリーン画像を配信（`Cache-Control: public, max-age=31536000, immutable`）。Google GMC / Meta クローラーが参照。 |
-| **リーガル / アセット** | `GET, HEAD /privacy`<br>`GET, HEAD /terms`<br>`GET, HEAD /assets/:filename` | Public GET/HEAD | Polaris準拠プライバシーポリシー（Zero-PII明記）、利用規約（賠償上限$65明記）、公式アプリアイコン・バナー配信。 |
-| **Shopify OAuth** | `GET /api/auth`<br>`GET /api/auth/callback`<br>(エイリアス: `/auth`, `/login`, `/auth/callback`) | `verifyShopifyQueryHmac` + R2ワンタイム `state` nonce | Shopify OAuth 2.0 認可（iframeエスケープHTML返却）、アクセストークン交換（`shpat_...`）、R2 `state/{shop}/auth.json` 保存、`MetafieldDefinition` 作成、Webhook初期登録。 |
-| **出品・更新Webhook** | `POST /webhooks/products/update`<br>(`POST /api/webhooks/products/update`) | `verifyShopifyWebhookHmac` (Raw Body HMAC-SHA256) | 商品画像登録・更新を検知し、べき等性・ループ判定・クォータ確認後、RunPod AIクリーンアップ ➔ R2保存 ➔ `safemedia.clean_ad_image_url` 格納を実行。 |
-| **RunPod非同期コールバック** | `POST /webhooks/runpod/callback` | HMAC/Signature検証 + ジョブ照合 | RunPod GPUコールドスタート時等の完了結果を非同期受領し、R2クリーン画像保存とメタフィールド格納を完了。 |
-| **GDPR / 必須Webhook** | `POST /webhooks/privacy/customers/data_request`<br>`POST /webhooks/privacy/customers/redact`<br>`POST /webhooks/privacy/shop/redact`<br>`POST /webhooks/compliance`<br>`POST /webhooks/app/uninstalled` | `verifyShopifyWebhookHmac` (Raw Body HMAC-SHA256) | GDPR必須3種（PII不保持応答、ショップデータ完全消去）およびアンインストール時の自動同期停止・サーキットブレーカー発動。 |
-| **ステータス / フィード検証** | `GET /api/status`<br>`GET /api/feed-preview`<br>`GET /api/feed-preview.xml` | `verifyTenantToken` / `verifySessionToken` / `isFeedAccessAuthorized` | テナント課金状態、カナリア消費数、最新スナップショット、Google Shopping (`g:image_link`) & Meta (`image_link`) フィードマッピング検証ペイロード（JSON/RSS XML）、直近ロールバック差分を返却。 |
-| **カナリアテスト** | `POST /api/canary/test` | `verifyTenantToken` + Anti-TOCTOU 5件予約 | 1商品のAIバナー消去シミュレーション、`safemedia.clean_ad_image_url` 格納、全バリアント紐付け保持確認、Before/After画像を返却（6件目以降は `402 Payment Required`）。 |
-| **単一商品即時同期** | `POST /api/dual-feed/sync` | `verifyTenantToken` + 7層SSRF防御 | 指定商品のデュアルフィードAIクリーンアップとメタフィールド格納を即時実行し、Google/Metaフィードマッピング結果を返却。 |
-| **全件一括生成 & 緊急停止** | `POST /api/batch/start`<br>`POST /api/batch/abort`<br>`POST /api/batch/resume` | `verifyTenantToken` + 課金プラン確認 (`TRIAL_14D_ACTIVE` / `ACTIVE`) | 事前スナップショット保存後、`ctx.waitUntil` で全商品のクリーン画像を非同期生成。`abort` で1ミリ秒即時停止（`423 Locked`）。 |
-| **スナップショット & ロールバック** | `POST /api/snapshot/create`<br>`GET /api/snapshot/list`<br>`POST /api/rollback` *(4.5.3拡張)* | `verifyTenantToken` | R2世代管理スナップショットの作成、一覧取得、および1クリック復元。**復元前（`beforeRevert`）と復元後（`afterRevert`）の商品データ差分配列 (`productDataDiffs`)** を返却。 |
-| **Webhook / 自動同期制御** | `POST /api/webhooks/register`<br>`POST /api/webhooks/unregister`<br>`POST /api/auto-sync/toggle` | `verifyTenantToken` | Shopify `PRODUCTS_UPDATE` Webhook購読登録・解除、および `autoSyncEnabled` フラグの永続化切替。 |
-| **課金ゲート (Billing)** | `POST /api/billing/subscribe`<br>`POST /api/billing/activate-now`<br>`GET /api/billing/confirm`<br>`POST /api/billing/reset` | `verifyTenantToken` / `ADMIN_API_SECRET` | Shopify Billing API承認URL発行、50枚トライアル上限時の即時本契約アクティベート、課金承認コールバック照合、リセット機能。 |
-| **管理・パージAPI** | `POST, GET /api/admin/purge-metafields` | `ADMIN_API_SECRET` または正規店舗セッション | 指定ストアの全商品からメタフィールドを一括削除し、カナリア利用数を0に初期化。 |
+| **Shopify OAuth** | `GET /api/auth`<br>`GET /api/auth/callback` | `verifyShopifyQueryHmac` + R2ワンタイム `state` nonce | OAuth完了時の `ensureCleanAdMetafieldDefinition()` にて、`PRODUCT` 用に加えて **`PRODUCTVARIANT` 用の `safemedia.clean_ad_image_url` 定義も自動作成・ピン留め**。 |
+| **カナリアテスト** | `POST /api/canary/test` | `verifyTenantToken` + Anti-TOCTOU 5件予約 | 選定商品の代表画像＋全バリアント固有画像（最大5ユニーク画像）に7層SSRF検証を実施し、並列AI推論を実行。親＋全バリアントのMetafieldへ保存し、`variantChecks[]` に各バリアントの `originalImageUrl` (Before) と `cleanAdImageUrl` (After) を格納して返却。 |
+| **全件一括生成 & 緊急停止** | `POST /api/batch/start`<br>`POST /api/batch/abort`<br>`POST /api/batch/resume`<br>`POST /api/batch/cancel` | `verifyTenantToken` + 課金プラン確認 (`TRIAL_14D_ACTIVE` / `ACTIVE`) | 各商品の未処理ユニーク画像（代表＋バリアント）を抽出し、**1チャンクあたり最大2〜3枚のユニーク画像推論**で分割進行（Workers 30秒制限の完全回避）。サーキットブレーカー発動時は商品の途中でも次の画像推論前に即座に中断。 |
+| **出品・更新Webhook** | `POST /webhooks/products/update` | `verifyShopifyWebhookHmac` (`< 50ms` 即時 200 OK) | ペイロードおよびGraphQLから代表＋全バリアント画像URLを抽出し、`dualFeedMetadata.cleanedImageUrls` と差分比較。**未処理・変更されたユニーク画像URL群のみ**を非同期AI推論へ投入。全画像が処理済みなら `already_cleaned_for_current_image` で即時スキップ。 |
+| **RunPod非同期コールバック** | `POST /webhooks/runpod/callback` | HMAC署名検証 (`sig`) + `claimWebhookCompletion` | クエリに `imageUrl`（対象元画像URL）を受け取り、R2保存後に対象商品の `cleanedImageUrls[imageUrl]` をマージ更新し、該当画像を参照する親商品および全該当バリアントの `safemedia.clean_ad_image_url` を一括更新。 |
+| **フィード検証・配信** | `GET /api/feed-preview`<br>`GET /api/feed-preview.xml` | `isFeedAccessAuthorized` (`?token=` またはセッション) | クリーン済商品の**全バリアントを個別 `<item>`（`<g:id>shopify_US_{prodId}_{varId}</g:id>`, `<g:item_group_id>{prodId}</g:item_group_id>`, `<g:image_link>{variantCleanUrl}</g:image_link>`）として展開**したRSS 2.0 XMLおよびJSONをR2キャッシュから高速配信。 |
+| **スナップショット & ロールバック** | `POST /api/snapshot/create`<br>`GET /api/snapshot/list`<br>`POST /api/rollback` | `verifyTenantToken` + 課金ゲート | スナップショットに全バリアントの `cleanAdImageUrl` を保存。ロールバック時は親商品＋全バリアントのメタフィールドを一括復元（`RESTORED_TO_SNAPSHOT`）または完全消去（`PURGED_TO_VIRGIN`）し、6カラム比較用の `RollbackProductDataDiff[]` を返却。 |
 
 ---
 
-## 4. Cloudflare R2 バケット構成 & データモデル設計
+## 4. Cloudflare R2 バケット構成 & 拡張データモデル設計
 
-バインディング名: `SNAPSHOT_BUCKET`（バケット名: `safemedia-snapshots`、定義: [`cloudflare_worker/wrangler.toml`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/wrangler.toml#L1-L8)）  
-すべてのオブジェクトキーは厳格なドメイン正規表現（`/^[a-zA-Z0-9][a-zA-Z0-9-]{1,60}\.myshopify\.com$/`）で検証された `{shop_domain}` プレフィックスによって**テナントごとに物理分離**されます。
+バインディング名: `SNAPSHOT_BUCKET`（バケット名: `safemedia-snapshots`、定義: [`cloudflare_worker/wrangler.toml`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/wrangler.toml#L1-L8)）
 
 ```text
 safemedia-snapshots/
 ├── clean_images/                                    # AI生成された広告フィード専用クリーン画像 (Public CDN配信)
 │   └── {shop_domain}/
-│       └── clean_{product_id}_{timestamp}.jpg
-├── snapshots/                                       # 世代管理イミュータブルスナップショット (1クリック復元用)
+│       └── clean_{product_id}_{img_hash}_{ts}.jpg   # 親・各バリアント固有クリーン画像 (ハッシュ識別子付)
+├── feeds/                                           # 補助フィード静的キャッシュ (全バリアント <item> 展開済)
+│   └── {shop_domain}/
+│       ├── google-shopping.xml                      # GMC RSS 2.0 XML (g:id, g:item_group_id, g:image_link)
+│       └── feed.json                                # JSON フィードプレビュー
+├── snapshots/                                       # 世代管理イミュータブルスナップショット (親+全バリアント状態保持)
 │   └── {shop_domain}/
 │       ├── baseline.json                            # 処女原本 (Virgin Baseline) 永続ポインタ
-│       ├── latest.json                              # 最新スナップショットへのポインタ ({ latestSnapshotId, key })
+│       ├── latest.json                              # 最新スナップショットへのポインタ
 │       └── snap_{shop}_{timestamp}.json             # 完全復元用 StoreSnapshot JSON
 ├── locks/                                           # 分散排他ランナー＆GPUスロット制御
 │   └── {shop_domain}/
+│       ├── batch_runner.json                        # チャンク実行排他ロック (TTL 20秒)
+│       ├── in_flight_{product_id}.json              # 商品別In-Flight排他ロック (TTL 60秒)
 │       └── gpu_slot_{1..2}.json                     # Webhook GPU並列実行スロット制御 (TTL 45秒)
-├── dedup/                                           # Webhook重複排除（べき等性保証）
+├── dedup/                                           # Webhook & Callback 重複排除（べき等性保証）
 │   └── {shop_domain}/
-│       └── {webhook_id}.json                        # 処理済み Webhook ID 永続化
-└── state/                                           # テナント別認証・課金・OAuth nonce 状態
+│       ├── {webhook_id}.json                        # 処理済み Shopify Webhook ID
+│       └── cb_done_{product_id}_{img_key}.json      # 画像別 RunPod 完了排他ロック
+└── state/                                           # テナント別認証・課金・ジョブ・差分状態
     └── {shop_domain}/
-        ├── auth.json                                # TenantAuthState (accessToken, scope, installedAt)
-        ├── billing.json                             # TenantBillingState (planStatus, canaryUsedCount, trialUsedCount, monthlyUsageCount)
-        ├── last_rollback.json                       # 直近ロールバック時の Before/After 商品データ差分記録 (4.5.3証跡保持)
-        └── oauth_state_{nonce}.json                 # OAuth CSRF防止用ワンタイム state (検証後即時削除)
+        ├── auth.json                                # TenantAuthState
+        ├── billing.json                             # TenantBillingState
+        ├── job.json                                 # BatchJobState (商品＆ユニーク画像進捗)
+        └── last_rollback.json                       # 直近ロールバック時の Before/After 商品＆バリアント差分記録
+```
+
+### 拡張 TypeScript 型定義（[`cloudflare_worker/src/types.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/types.ts) 準拠）
+```typescript
+export interface VariantMapping {
+  variantId: string;
+  variantTitle: string;
+  originalMediaId: string;
+  originalImageUrl: string;
+  cleanAdImageUrl?: string;                  // バリアント固有のAIクリーン画像URL
+  sku?: string;
+  price?: string;
+}
+
+export interface DualFeedMetadataRecord {
+  sourceImageUrl?: string;
+  shopifyImageUrl?: string;
+  cleanedAt?: string;
+  maskCoveragePct?: number;
+  processingSec?: number;
+  engine?: string;
+  cleanedImageUrls?: Record<string, string>;     // 元画像URL ➔ クリーン画像URL の重複排除マップ
+  variantCleanImageMap?: Record<string, string>; // variantId ➔ クリーン画像URL のマッピング
+}
+
+export interface CanaryVariantCheck {
+  variantId: string;
+  title: string;
+  hasOriginalMedia: boolean;
+  preserved: boolean;
+  originalImageUrl?: string;                 // バリアントBefore画像 (セール帯付き)
+  cleanAdImageUrl?: string;                  // バリアントAfter画像 (AI帯消去済)
+  variantTitle?: string;
+  activeImageUrl?: string;
+}
 ```
 
 ---
 
-## 5. Shopify Webhook ペイロード処理フロー & RunPod 非同期呼び出しシーケンス
+## 5. パイプライン別シーケンス設計（Webhook / Batch / Canary）
 
-### 5.1 エンドツーエンド非同期処理シーケンス図 (`products/update` ➔ RunPod ➔ R2 ➔ Metafield)
+### 5.1 Webhook 自動同期 & RunPod 非同期コールバック分離シーケンス（全バリアント差分処理）
 
 ```mermaid
 sequenceDiagram
@@ -117,167 +187,112 @@ sequenceDiagram
     participant CFW as "Cloudflare Workers (Gateway)"
     participant R2 as "Cloudflare R2 (safemedia-snapshots)"
     participant RunPod as "RunPod Serverless GPU (Florence-2 + LaMa)"
-    participant AdFeeds as "Google Shopping (g:image_link) & Meta (image_link)"
 
-    Merchant->>Shopify: セール帯・バッジ付き商品画像をアップロード・保存
-    Shopify->>CFW: POST /webhooks/products/update (X-Shopify-Hmac-Sha256, Raw JSON)
+    Merchant->>Shopify: マルチバリアント商品にセール帯付きバリアント画像を登録・保存
+    Shopify->>CFW: POST /webhooks/products/update (Raw JSON + HMAC)
+    CFW->>CFW: 1. HMAC-SHA256 検証 & Webhook ID 重複照合
+    CFW-->>Shopify: 2. < 50ms 即時 200 OK ({ accepted: true }) — ctx.waitUntil で非同期継続
 
     rect rgb(245, 247, 250)
-        Note over CFW,R2: Phase A: ゼロトラスト検証・べき等性・ループ防衛・クォータ制御
-        CFW->>CFW: 1. Shopドメイン正規表現検証 & Web Crypto HMAC-SHA256 署名検証 (不一致は 401)
-        CFW->>R2: 2. GET state/{shop}/billing.json (autoSyncEnabled, circuitBreakerTripped, planStatus)
-        CFW->>CFW: 3. サーキットブレーカー確認 (Tripped時は 423 Locked) & Auto-Sync確認
-        CFW->>CFW: 4. 7層SSRFフィルタ検査 (isValidPublicImageUrl: 内部IP/IMDSは 400 遮断)
-        CFW->>CFW: 5. 自己発火ループ防止照合 (shopifyImageUrl === dualFeedMetadata.shopifyImageUrl なら 200 Skip)
-        CFW->>CFW: 6. In-Flight 排他ロック取得 (Key: "{shop}:{productId}", TTL: 60s)
-        CFW->>R2: 7. CANARY_TRIAL時は Anti-TOCTOU 先行クォータ予約 (canaryUsedCount += 1, >5 は 402)
+        Note over CFW,Shopify: Phase A: 全バリアント画像抽出・URL重複排除・差分特定
+        CFW->>R2: 3. GET state/{shop}/billing.json & auth.json (Circuit Breaker / AutoSync / Quota 確認)
+        CFW->>Shopify: 4. GraphQL fetchProductById (親 media + 全 variants.media + 既存 dualFeedMetadata)
+        CFW->>CFW: 5. 親代表画像 + 全バリアント originalImageUrl から uniqueImageUrls を構築
+        CFW->>CFW: 6. dualFeedMetadata.cleanedImageUrls と照合し、未処理の uncleanedUrls のみを抽出
+        Note over CFW: uncleanedUrls が 0件なら { skipped: true, reason: "already_cleaned_for_current_image" } で即時終了 (無限ループ完全遮断)
+        CFW->>CFW: 7. 全 uncleanedUrls に対して 7層SSRF検証 (isValidPublicImageUrl)
     end
 
     rect rgb(235, 248, 242)
-        Note over CFW,RunPod: Phase B: RunPod Serverless AI推論 & イミュータブル保存 (Fast Polling 10s + Webhook Callback委託)
-        CFW->>RunPod: POST /run (image_url, Florence-2 OCR + Big-LaMa Inpainting, webhook callbackUrl)
-        alt 10秒以内に推論完了
-            RunPod-->>CFW: 200 OK (clean_image_base64, maskCoveragePct, processingSec: ~4.75s)
-            CFW->>R2: PUT clean_images/{shop}/clean_{productId}_{ts}.jpg
-            R2-->>CFW: 公開CDN URL確定 (https://{worker}/clean-media/{shop}/clean_{productId}_{ts}.jpg)
-        else コールドスタート等で10秒超過
-            CFW-->>Merchant: deferredToCallback: true (200 OK即時応答でWorkers終了)
-            RunPod->>CFW: POST /webhooks/runpod/callback (完了結果を非同期受領)
-            CFW->>R2: PUT clean_images/{shop}/clean_{productId}_{ts}.jpg
+        Note over CFW,RunPod: Phase B: ユニーク未処理画像の推論 & コールバック分離
+        loop 各 targetUrl in uncleanedUrls (クォータ事前予約 & GPU Slot 制御)
+            CFW->>RunPod: 8. POST /run (image_url: targetUrl, webhook: /webhooks/runpod/callback?imageUrl=...)
+            alt ウォーム起動 (10秒以内に推論完了)
+                RunPod-->>CFW: 200 OK (clean_image_base64)
+                CFW->>R2: 9a. PUT clean_images/{shop}/clean_{prodId}_{hash}_{ts}.jpg
+            else コールドスタート (>10秒)
+                RunPod->>CFW: 9b. POST /webhooks/runpod/callback (完了後に独立Workerで受信・R2保存)
+            end
         end
     end
 
     rect rgb(240, 244, 255)
-        Note over CFW,AdFeeds: Phase C: 非破壊メタフィールド格納 & デュアルフィード分離配信
-        CFW->>Shopify: GraphQL mutation metafieldsSet (safemedia.clean_ad_image_url & dual_feed_metadata)
-        Shopify-->>CFW: Metafield Updated (Storefront MediaImage IDは100%不変)
-        CFW->>CFW: In-Flight ロック解放 & 200 OK 応答
-        Shopify-->>Merchant: Online Storefront: 元のセール帯画像をそのまま表示 (高CVR維持)
-        Shopify-->>AdFeeds: Google Shopping (g:image_link) / Meta (image_link): R2クリーン画像を配信 (審査通過)
+        Note over CFW,Shopify: Phase C: 親商品 + 全バリアント Metafield 一括格納 & R2フィード更新
+        CFW->>Shopify: 10. GraphQL metafieldsSet (Product.clean_ad_image_url + 全 ProductVariant.clean_ad_image_url + dual_feed_metadata)
+        CFW->>Shopify: 11. GraphQL productVariantsBulkUpdate (全バリアントのオリジナル MediaImage ID 紐付けを100%保護)
+        CFW->>R2: 12. syncAdFeedToR2 (全バリアント展開済みの google-shopping.xml / feed.json を更新)
     end
 ```
 
-### 5.2 Webhook ペイロード処理における5大防衛ガード（Denial of Wallet & 無限ループ防止）
-1. **HMAC-SHA256 厳格検証**: Raw Request Body に対して Web Crypto API で署名を算出し、[`timingSafeEqual()`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L34-L42) で定数時間比較。
-2. **Webhook 自己発火ループ防止（Infinite Loop Breaker）**:
-   - `metafieldsSet` で商品のメタフィールドを更新すると、Shopifyは再度 `products/update` Webhookを発火します。
-   - ワーカーは商品の現在メイン画像URL（`shopifyImageUrl`）と、`safemedia.dual_feed_metadata` 内に記録された `sourceImageUrl` / `shopifyImageUrl` を照合し、一致する場合は **`{ skipped: true, reason: "already_cleaned_for_current_image" }`** としてRunPod呼び出しを即座にスキップします。これにより無限ループとGPU課金暴走を100%遮断します。
-3. **In-Flight 排他ロック**: `inFlightLocks` マップ（キー: `${shop}:${productId}`, TTL: `60,000ms`）により、短時間の重複Webhook配信による二重推論を排除します。
-4. **Anti-TOCTOU 2フェーズ・クォータ予約**: 無料サンプル枠（`CANARY_TRIAL`: 最大5件）では、RunPod推論前に `canaryUsedCount` を先行インクリメントしてR2へ書き込み、推論失敗時のみデクリメント返金することで、並行バーストによる無料枠突破（Denial of Wallet）を完全に防ぎます。
-5. **RunPod タイムアウト & 動的ポーリング制御**: RunPod Serverless 呼び出しには投入タイムアウト（`10,000ms`）および Fast Polling（最大10秒）を設定し、コールドスタート時は RunPod Webhook コールバックへ安全に委託します。
+### 5.2 カタログ一括バッチ（`BatchRunner`）における画像単位チャンク制御
+- **課題**: 1商品に10枚の異なるバリアント画像があるケースで「1チャンク＝2商品（最大20画像）」を直列推論すると、Cloudflare Workers の30秒実行時間制限を超過します。
+- **解決設計（Image-Aware Chunking）**:
+  1. `runBatchChunk()` 内のチャンク上限を「商品数（最大2商品）」だけでなく**「1チャンクあたりの最大新規AI推論画像枚数（`MAX_IMAGES_PER_CHUNK = 3` 枚）および経過時間バジェット（`18秒`）」**で制御します。
+  2. 1商品内で複数枚のユニーク画像を処理する際は、最大2〜3枚ずつ並列推論（`Promise.all`）し、完了した分を即座に `dualFeedMetadata.cleanedImageUrls` に記録します。
+  3. 1商品の途中で18秒バジェットまたは3枚上限に達した場合は、その時点までの `cleanedImageUrls` を保存してチャンクを安全にクローズし、次チャンク（2.5秒後の `/api/status` ポーリングまたはチェーン起動）で同じ商品の残り未処理バリアント画像からシームレスに再開します。
+  4. バッチループ内で `circuitBreakerTripped` を画像推論の直前に毎回チェックし、緊急停止ボタン（`POST /api/batch/abort`）押下時に残りのバリアント画像推論を即座に中断します。
 
 ---
 
-## 6. Shopify App Review (4.5.3) 審査要件アーキテクチャ定義
+## 6. Shopify App Review (4.5.3) 審査要件アーキテクチャ定義（全バリアント拡張版）
 
-### 6.1 【審査要件 4.5.3 - ①】Google Shopping (`g:image_link`) および Meta Catalog (`image_link`) へのマッピング・配信データフロー設計
+### 6.1 【審査要件 4.5.3 - ①】Google Shopping (`g:image_link` / `g:item_group_id`) & Meta (`image_link`) 全バリアント配信設計
 
-#### (1) データフロー・アーキテクチャ図
+Google Merchant Center において複数バリアント商品の画像を上書きする場合、補助フィード（Supplemental Feed）には親商品IDを `<g:item_group_id>` とし、各バリアントのID（`shopify_US_{productId}_{variantId}`）を `<g:id>` とするバリアント別 `<item>` エントリが必要です。
+
 ```mermaid
 flowchart TD
-    subgraph MerchantAction["1. マーチャント操作 (Shopify Admin)"]
-        UP["商品画像登録 (SALE / 20% OFF バッジ付き)"]
+    subgraph StoreData["Shopify 商品 & バリアントデータ"]
+        ORIG_V["各バリアントの Storefront 画像<br/>Variant 1: Sunset Orange (SALE帯)<br/>Variant 2: Arctic Blue (50% OFF帯)<br/>Variant 3: Stealth Black (FREE SHIP帯)"]
+        META_P["Product Metafield<br/>product.metafields.safemedia.clean_ad_image_url"]
+        META_V["Variant Metafields<br/>variant.metafields.safemedia.clean_ad_image_url<br/>(各バリアントの帯消去済R2 URL)"]
     end
 
-    subgraph AdFeedClean["2. AdFeed Clean (Cloudflare Workers + RunPod + R2)"]
-        PIN["GraphQL: metafieldDefinitionCreate<br>namespace: safemedia, key: clean_ad_image_url<br>type: url, ownerType: PRODUCT, pin: true"]
-        CLEAN["AI Inpainting (Florence-2 + LaMa)<br>R2 CDN: /clean-media/{shop}/clean_{id}.jpg"]
-        SET["GraphQL: metafieldsSet<br>product.metafields.safemedia.clean_ad_image_url"]
-        PIN --> SET
-        CLEAN --> SET
+    subgraph SupplementalFeed["R2 補助フィード (/api/feed-preview.xml & .json)"]
+        ITEM1["<item><br/>g:id = shopify_US_{prodId}_{var1Id}<br/>g:item_group_id = {prodId}<br/>g:image_link = clean_var1.jpg"]
+        ITEM2["<item><br/>g:id = shopify_US_{prodId}_{var2Id}<br/>g:item_group_id = {prodId}<br/>g:image_link = clean_var2.jpg"]
+        ITEM3["<item><br/>g:id = shopify_US_{prodId}_{var3Id}<br/>g:item_group_id = {prodId}<br/>g:image_link = clean_var3.jpg"]
     end
 
-    subgraph DualRouting["3. デュアルフィード分離配信 (Pure Dual-Feed Smart Routing)"]
-        SF["Online Storefront (Liquid Theme)<br>参照属性: product.featured_media<br>配信画像: 元のセール帯・バッジ付き画像 (100%不変)"]
-        GMC["Google Shopping / Google Merchant Center<br>マッピング属性: g:image_link<br>参照元: safemedia.clean_ad_image_url<br>配信画像: AIクリーン画像 (ポリシー準拠)"]
-        META["Meta Ad Catalog (Facebook & Instagram)<br>マッピング属性: image_link<br>参照元: safemedia.clean_ad_image_url<br>配信画像: AIクリーン画像 (テキスト被りなし)"]
-    end
-
-    UP -->|"オリジナル保持"| SF
-    UP -->|"Webhook / Batch"| CLEAN
-    SET -->|"Google & YouTube App / Feed Rule"| GMC
-    SET -->|"Facebook & Instagram App / Catalog Mapping"| META
+    ORIG_V -->|"100% 非破壊 (Storefront維持)"| SF["Online Storefront<br/>全バリアントで元のセール帯画像を表示"]
+    META_P & META_V --> ITEM1 & ITEM2 & ITEM3
+    ITEM1 & ITEM2 & ITEM3 -->|"GMC / Meta 補助フィード連携"| ADS["Google Shopping & Meta Ads<br/>全バリアントで帯消去済クリーン画像を配信"]
 ```
 
-#### (2) Shopify Admin 可視化 (`MetafieldDefinition`) とフィード検証エンドポイント (`GET /api/feed-preview`)
-1. **Shopify Admin ピン留め定義 (`ensureCleanAdMetafieldDefinition`)**:
-   - OAuth完了時、Webhook登録時、またはデュアルフィード同期時に `metafieldDefinitionCreate` ミューテーションを実行し、Shopify Admin の商品詳細画面下部の「Metafields」セクションに `Clean Ad Image URL (Google/Meta Feed)` (`safemedia.clean_ad_image_url`) を自動ピン留め表示します。
-2. **フィード配信マッピング検証エンドポイント (`GET /api/feed-preview`)**:
-   - 各商品について、①オンラインストア表示画像 (`storefrontImageUrl`)、②格納されたメタフィールド (`safemedia.clean_ad_image_url`)、③Google Merchant Center XML/JSON フィードにおける `<g:image_link>` 出力値、④Meta Catalog フィードにおける `image_link` 出力値を一括返却します。
-   - これにより、ダッシュボード画面上で「元のバッジ付き画像がストアフロントで維持されつつ、Google Shopping (`g:image_link`) と Meta (`image_link`) にはクリーン画像URLがマッピング・配信されている証拠」を1画面で実演・検証可能にします。
+### 6.2 【審査要件 4.5.3 - ②】ロールバック時の親商品＋全バリアント Before/After 差分スキーマ設計
 
----
+1クリック・ロールバック（`POST /api/rollback`）実行時、親商品の `safemedia.clean_ad_image_url` / `dual_feed_metadata` だけでなく、**全バリアント（`ProductVariant`）に付与された `safemedia.clean_ad_image_url` も一括でスナップショット時点へ復元（または `Virgin Baseline` 選択時は `metafieldsDelete` で完全消去）**します。
 
-### 6.2 【審査要件 4.5.3 - ②】スナップショット・ロールバック時の Before / After 商品データ差分スキーマ設計
-
-#### (1) ロールバック比較データ取得・復元シーケンス図
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Reviewer as "Merchant / Shopify Reviewer"
-    participant UI as "Dashboard UI (Inline Comparison Table)"
-    participant CFW as "Cloudflare Workers (POST /api/rollback)"
-    participant R2 as "Cloudflare R2 (snapshots/{shop})"
-    participant Shopify as "Shopify GraphQL Admin API"
-
-    Reviewer->>UI: Step 3「Revert to Previous Snapshot」➔ モーダルで「Yes, Restore Now」クリック
-    UI->>CFW: POST /api/rollback { shop, snapshotId }
-    CFW->>Shopify: 1. 現在のライブ商品一覧・Metafield・Variant紐付けを取得 (Before Revert 状態記録)
-    CFW->>R2: 2. GET snapshots/{shop}/{snapshotId}.json (復元対象スナップショット取得)
-    loop 各商品 (Product)
-        CFW->>Shopify: 3. productVariantsBulkUpdate (全バリアントの MediaImage ID を再バインド)
-        alt スナップショット時点で cleanAdImageUrl が存在していた場合
-            CFW->>Shopify: 4a. metafieldsSet (スナップショット時点の clean_ad_image_url を復元)
-        else スナップショット時点で未設定 (初期状態) だった場合
-            CFW->>Shopify: 4b. metafieldDelete (safemedia.clean_ad_image_url を完全消去・初期状態へ復元)
-        end
-        CFW->>CFW: 5. Before Revert と After Revert の差分オブジェクト (RollbackProductDataDiff) を構築
-    end
-    CFW->>R2: 6. PUT state/{shop}/last_rollback.json (比較証跡をR2にも保存)
-    CFW-->>UI: 200 OK { success, snapshotId, productDataDiffs, beforeAfterComparisons }
-    UI->>UI: 7. モーダルを閉じ、画面内に「Rollback Before vs. After Product Data Comparison」テーブルを永続描画
-```
-
-#### (2) `RollbackProductDataDiff` & `RollbackExecutionResult` 厳密型定義（[`cloudflare_worker/src/types.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/types.ts#L177-L214) 実効仕様準拠）
 ```typescript
 export interface RollbackProductDataDiff {
   productId: string;
   productTitle: string;
   snapshotId: string;
-  snapshotTimestamp: string;
   revertedAt: string;
-  storefrontImageUrl: string;              // ① Storefront Image URL (Before/Afterを通じて不変)
-  storefrontUnchanged: true;               // true (ストアフロント非破壊の完全証明)
+  storefrontImageUrl: string;              // ストアフロント代表画像URL (不変)
+  storefrontUnchanged: true;               // ストアフロント非破壊証明フラグ
   beforeRevert: {
     storefrontImageUrl: string;
-    cleanAdImageMetafield: string | null;  // ② Rollback前の safemedia.clean_ad_image_url 値
-    gmcImageLink: string;                  // Rollback前の Google Shopping g:image_link 実効値
-    metaImageLink: string;                 // Rollback前の Meta Catalog image_link 実効値
+    cleanAdImageMetafield: string | null;  // ロールバック前の親 clean_ad_image_url
+    gmcImageLink: string;
+    metaImageLink: string;
     variantCount: number;
+    cleanedVariantCount?: number;          // ロールバック前にクリーン画像が設定されていたバリアント数
+    variantCleanImageMap?: Record<string, string>; // ロールバック前のバリアント別クリーンURL
     variantLinksPreserved: boolean;
   };
   afterRevert: {
     storefrontImageUrl: string;
-    cleanAdImageMetafield: string | null;  // ② Rollback後の safemedia.clean_ad_image_url 値 (復元値または null)
-    gmcImageLink: string;                  // Rollback後の Google Shopping g:image_link 実効値
-    metaImageLink: string;                 // Rollback後の Meta Catalog image_link 実効値
+    cleanAdImageMetafield: string | null;  // ロールバック後の親 clean_ad_image_url (復元値または null)
+    gmcImageLink: string;
+    metaImageLink: string;
     metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN";
     variantCount: number;
-    variantLinksPreserved: boolean;        // ③ Variant Mapping 保持ステータス (true: 100% Preserved)
+    cleanedVariantCount?: number;          // ロールバック後のクリーン済バリアント数 (Virgin復元時は 0)
+    variantCleanImageMap?: Record<string, string>; // ロールバック後のバリアント別クリーンURL
+    variantLinksPreserved: boolean;        // バリアント紐付け100%保持 (true)
   };
-}
-
-export interface RollbackExecutionResult {
-  success: boolean;
-  restoredCount: number;
-  restoredProducts: number;
-  snapshotId: string;
-  snapshotTimestamp: string;
-  revertedAt: string;
-  metafieldsRestored: boolean;
-  productDataDiffs: RollbackProductDataDiff[];
-  beforeAfterComparisons: RollbackProductDataDiff[];
-  message: string;
+  clearedAfterRollback?: boolean;
 }
 ```
 
@@ -285,26 +300,23 @@ export interface RollbackExecutionResult {
 
 ## 7. 次工程（Phase 2〜Phase 5）での変更対象ファイル一覧
 
-> [!NOTE]
-> **Phase 1 ルール厳守**: 本工程（Phase 1）ではコードの編集は一切行わず、マスター設計書（[`docs/SYSTEM_DESIGN.md`](file:///Users/yusuke/antigravity/Micro-SaaS/docs/SYSTEM_DESIGN.md#L1-L45)）の更新と本実装計画書（Artifact）の策定のみを完了しています。以下のファイル変更は Phase 2〜Phase 5 の指示に基づき順次実行します。
-
 | 対象フェーズ | ファイルパス | 変更種別 | 変更内容の要約 |
 | :---: | :--- | :---: | :--- |
-| **Phase 2**<br>(Foundation) | [`cloudflare_worker/wrangler.toml`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/wrangler.toml)<br>[`cloudflare_worker/src/index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts) | 確認・補強 | Cloudflare Workers 設定、Shopify OAuth 2.0 認証フロー（`/api/auth`, `/api/auth/callback`）、Session Token 検証、R2 バインディングの整合性確認。 |
-| **Phase 3**<br>(Backend) | [`cloudflare_worker/src/types.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/types.ts)<br>[`cloudflare_worker/src/shopify.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts)<br>[`cloudflare_worker/src/snapshot.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/snapshot.ts)<br>[`cloudflare_worker/src/index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts) | 機能拡張 | ① `metafieldDefinitionCreate` による Admin Metafield Definition 登録、② `GET /api/feed-preview`, `/api/feed-preview.xml`（Google Shopping `g:image_link` & Meta `image_link` マッピング検証・配信API）実装、③ `POST /api/rollback` で `beforeRevert` / `afterRevert` の商品データ差分（`RollbackProductDataDiff[]`）を計算・保存・返却する処理の実装。 |
-| **Phase 4**<br>(Frontend) | [`cloudflare_worker/src/ui.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/ui.ts) | UI拡張 | 英語標準（`EN`）・`alert()`/`confirm()` 完全不使用で、① 4ステップ オンボーディング＆Google Shopping (`g:image_link`) / Meta (`image_link`) マッピングガイド、② Storefront画像（確認リンク付）vs. 広告フィードマッピング比較UI、③ ロールバック直後のインライン **「Rollback Before vs. After Product Data Comparison」テーブル**（6カラム）を実装。 |
-| **Phase 5**<br>(Audit & QA) | [`tests/e2e/test_pure_dual_feed_e2e.py`](file:///Users/yusuke/antigravity/Micro-SaaS/tests/e2e/test_pure_dual_feed_e2e.py) | 監査・検証 | セキュリティ監査（HMAC検証漏れ、RunPod過大課金防止、シークレット漏洩ゼロ）および Shopify App Review 4.5.3 の5ステップE2Eスクリーンキャスト要件の自動テスト検証。 |
+| **Phase 2**<br>(Foundation) | [`cloudflare_worker/wrangler.toml`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/wrangler.toml)<br>[`cloudflare_worker/src/index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts) | 流用・確認 | 既存の Cloudflare Workers / R2 バインディング / OAuth 2.0 / Session Token / Billing 基盤をそのまま流用（手戻りなし）。 |
+| **Phase 3**<br>(Backend) | [`cloudflare_worker/src/types.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/types.ts)<br>[`cloudflare_worker/src/shopify.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts)<br>[`cloudflare_worker/src/snapshot.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/snapshot.ts)<br>[`cloudflare_worker/src/index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts) | 機能拡張 | ① `PRODUCTVARIANT` MetafieldDefinition 作成および親＋全バリアントの `metafieldsSet` / `metafieldsDelete` 一括操作、② カナリア・バッチ・Webhook でのユニークバリアント画像抽出・重複排除・AI推論・コールバック統合、③ `/api/feed-preview(.xml)` での全バリアント `<item>` 展開、④ ロールバック時の全バリアントMetafield復元・消去。 |
+| **Phase 4**<br>(Frontend) | [`cloudflare_worker/src/ui.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/ui.ts) | UI拡張 | Step 1 カナリアプレビューの `.variant-pill` クリック（`selectVariant(idx)`）時に、該当バリアントの **Before（セール帯付きバリアント画像）と After（AI帯消去済バリアント画像）がペアで切り替わる** よう改修。6列ロールバック比較表およびフィード表示にバリアント対応ステータスを反映。 |
+| **Phase 5**<br>(Audit & QA) | [`docs/TEST_SPEC_SHOPIFY_INTEGRATION.md`](file:///Users/yusuke/antigravity/Micro-SaaS/docs/TEST_SPEC_SHOPIFY_INTEGRATION.md)<br>[`tests/test_canary_selection.py`](file:///Users/yusuke/antigravity/Micro-SaaS/tests/test_canary_selection.py)<br>[`tests/test_phase3_batch_sync_backend.py`](file:///Users/yusuke/antigravity/Micro-SaaS/tests/test_phase3_batch_sync_backend.py)<br>[`tests/test_spec_f1_to_f3.py`](file:///Users/yusuke/antigravity/Micro-SaaS/tests/test_spec_f1_to_f3.py)<br>[`tests/test_supplemental_feed_lifecycle.py`](file:///Users/yusuke/antigravity/Micro-SaaS/tests/test_supplemental_feed_lifecycle.py)<br>[`tests/e2e/test_pure_dual_feed_e2e.py`](file:///Users/yusuke/antigravity/Micro-SaaS/tests/e2e/test_pure_dual_feed_e2e.py) | 監査・検証 | 全自動テストスイートのマルチバリアント契約検証、SSRF全バリアントURL検査、重複排除による原価・クォータ保護検証、および新規テストストア実機総合テスト仕様書（A-1, B-2, C-1〜C-3, D-1〜D-4, E-1〜E-3, F-3）の実行。 |
 
 ---
 
-## 8. Phase 1 設計監査レポート (Security & Shopify Compliance Audit)
+## 8. Phase 1 & Phase 5 設計・コード監査レポート (Security & Shopify Compliance Audit)
 
-`global-security-auditor` および `shopify-compliance-auditor`（設計監査モード）に基づく Phase 1 アーキテクチャ監査結果は以下の通りです。
+`global-security-auditor` および `shopify-compliance-auditor` に基づく Phase 1〜5 アーキテクチャ・コード監査結果は以下の通りです。
 
-| 監査基準 | 判定 | 設計上の根拠・防御機構 |
+| 監査基準 | 判定 | 設計・実装上の根拠・防御機構 |
 | :--- | :---: | :--- |
-| **A1. Denial of Wallet (課金破産防止)** | **PASS** | ・未課金 (`CANARY_TRIAL`) 時は Anti-TOCTOU 2フェーズ予約で最大5件に厳格制限（6件目以降は `402 Payment Required`）。<br>・一括処理 (`/api/batch/start`) は14日間トライアル承認 (`TRIAL_14D_ACTIVE`) を必須化。<br>・RunPod呼び出しはタイムアウト45秒・最大リトライ1回・サーキットブレーカー (`423 Locked`) を完備。 |
-| **A2. Idempotency (べき等性・ループ防止)** | **PASS** | ・`products/update` Webhook 受信時、`shopifyImageUrl === dualFeedMetadata.shopifyImageUrl` 照合によりメタフィールド更新に伴う自己再発火を100%スキップ。<br>・`inFlightLocks` (`${shop}:${productId}`, TTL 60秒) により重複Webhookを排他制御。 |
-| **B1. Tenant Isolation (マルチテナント分離)** | **PASS** | ・全R2パスを `clean_images/{shop}/`, `snapshots/{shop}/`, `state/{shop}/` で分離。<br>・リクエストの Header / Query / Body の `shop` 不一致を `400 SHOP_DOMAIN_MISMATCH` (HPP防御) で遮断し、`verifyTenantToken` / `verifySessionToken` で認可検証。 |
-| **B2. Signature Validation & SSRF 防御** | **PASS** | ・全Webhookエンドポイントで Raw Body の HMAC-SHA256 署名検証を強制。<br>・画像URLフェッチ前に7層SSRFフィルタ (`isValidPublicImageUrl`) で内部IP・ループバック・クラウドIMDS (`169.254.169.254`) を完全遮断。 |
-| **C1. Shopify App Store 規約準拠 (OAuth / Billing / GDPR / 4.5.3)** | **PASS** | ・独自認証DB・外部決済（Stripe等）を一切持たず、Shopify OAuth 2.0・Session Token・Shopify Managed Billing API (`appSubscriptionCreate`) のみを使用。<br>・GDPR必須3種Webhook (`customers/data_request`, `customers/redact`, `shop/redact`) を完備。<br>・審査要件 `4.5.3` の5ステップ（Onboarding ➔ AI Cleanup & `g:image_link` / `image_link` Mapping ➔ Storefront Preservation ➔ 1-Click Rollback ➔ Before/After Product Data Comparison）を英語UI上で一貫して実演可能な設計を確立。 |
+| **A1. Denial of Wallet (課金破産防止)** | **PASS** | ・URL重複排除（`uniqueImageUrls`）およびクエリパラメータ正規化（`normalizeImageUrlKey`: `?v=` キャッシュバスター無視）により、同一画像を共有する複数バリアントやCDNタイムスタンプ変更時の重複GPU推論を100%排除。<br>・カナリアテストは1回最大5ユニーク画像（`MAX_CANARY_UNIQUE_IMAGES = 5`）、Webhook・単一同期APIは1リクエスト最大6ユニーク画像（`MAX_SYNC_UNIQUE_IMAGES_PER_REQUEST = 6`）、バッチは1チャンク最大3画像（`MAX_IMAGES_PER_CHUNK = 3`）に制限。<br>・500枚超過時の Pre-Flight 従量課金は `overageCount * $0.05` を合算した `O(1)` サブリクエストで記録。 |
+| **A2. Idempotency (べき等性・ループ防止)** | **PASS** | ・`dualFeedMetadata.cleanedImageUrls` に処理済み元画像URLとクリーン画像URLのペアを記録し、`lookupCleanedImageUrl` でベースURL照合も実施。<br>・`metafieldsSet` 起因で再発火する `products/update` Webhook において、全ユニーク画像URLが `cleanedImageUrls` に登録済みであれば `already_cleaned_for_current_image` として0ミリ秒でスキップし、無限ループを完全遮断。 |
+| **B1. Tenant Isolation (マルチテナント分離)** | **PASS** | ・R2キー（`clean_images/{shop}/`, `feeds/{shop}/`, `snapshots/{shop}/`, `state/{shop}/`）の厳格なテナント分離とBOLA防御を維持。 |
+| **B2. Signature Validation & 全バリアントSSRF防御** | **PASS** | ・代表画像だけでなく、**抽出されたすべてのバリアント画像URL（`uniqueImageUrls` 全件、最大100バリアント `variants(first: 100)` 対応）に対して7層SSRFフィルタ (`isValidPublicImageUrl`) を適用**。1件でも不正URLが含まれる場合は `400 INVALID_IMAGE_URL` で即座に遮断しクォータを返還。 |
+| **C1. Shopify App Store 規約準拠 (4.5.3 完全対応)** | **PASS** | ・オンラインストアのバリアント画像（`MediaImage` ID）は1ピクセルも変更せず、Google Shopping (`g:image_link` + `g:item_group_id`) と Meta (`image_link`) にのみ全バリアントのクリーン画像を分離配信。<br>・Step 1 のバリアントピルで全バリアントの Before/After を実演でき、Step 3 の1クリック・ロールバックで親＋全バリアントのメタフィールド復元を6カラム比較表で証明可能。 |

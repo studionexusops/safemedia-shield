@@ -599,7 +599,7 @@ print('OOB_PROBE_JSON:' + JSON.stringify({ threw, errMsg }));
         self.assertIn("activeImageUrl", data["errMsg"])
 
     def test_adversarial_product_title_html_injection_probe(self):
-        """Stress Test: Probe unescaped HTML interpolation in renderCanaryResult."""
+        """Stress Test: Verify HTML interpolation in renderCanaryResult is safely escaped (XSS protection)."""
         if not os.path.exists(JSC_BIN):
             self.skipTest(f"JavaScriptCore binary not found at {JSC_BIN}")
 
@@ -615,15 +615,16 @@ renderCanaryResult(payloadWithHtml);
 
 const injectedHtml = document.getElementById('canary-container').innerHTML;
 const hasInjectedTag = injectedHtml.includes('<span id=\"injected-probe-tag\">Unescaped Promo</span>');
-print('HTML_INJECTION_PROBE_JSON:' + JSON.stringify({ hasInjectedTag }));
+const hasEscapedTag = injectedHtml.includes('&lt;span id=&quot;injected-probe-tag&quot;&gt;Unescaped Promo&lt;/span&gt;');
+print('HTML_INJECTION_PROBE_JSON:' + JSON.stringify({ hasInjectedTag, hasEscapedTag }));
 """
         res = self._execute_jsc_test(js_test)
         self.assertEqual(res.returncode, 0)
         match = re.search(r"HTML_INJECTION_PROBE_JSON:({.*})", res.stdout)
         self.assertIsNotNone(match)
         data = json.loads(match.group(1))
-        # Note: In current implementation, HTML strings in title are interpolated directly into innerHTML
-        self.assertTrue(data["hasInjectedTag"])
+        self.assertFalse(data["hasInjectedTag"], "HTML tags in productTitle must be escaped to prevent DOM XSS")
+        self.assertTrue(data["hasEscapedTag"], "Escaped HTML entities should appear safely in rendered container")
 
 
 if __name__ == "__main__":

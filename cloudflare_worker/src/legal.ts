@@ -3,7 +3,8 @@
  * Styled with Shopify Polaris design guidelines, responsive layout, and bilingual (EN/JA) toggle.
  */
 
-export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en"): string {
+export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonce: string = ""): string {
+  const safeNonce = cspNonce && /^[a-zA-Z0-9+/=_-]+$/.test(cspNonce) ? ` nonce="${cspNonce}"` : "";
   return `<!DOCTYPE html>
 <html lang="${currentLang}">
 <head>
@@ -391,7 +392,7 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en"): string
     </div>
   </div>
 
-  <script>
+  <script${safeNonce}>
     function switchLang(lang) {
       const en = document.getElementById('content-en');
       const ja = document.getElementById('content-ja');
@@ -420,7 +421,8 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en"): string
 </html>`;
 }
 
-export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en"): string {
+export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNonce: string = ""): string {
+  const safeNonce = cspNonce && /^[a-zA-Z0-9+/=_-]+$/.test(cspNonce) ? ` nonce="${cspNonce}"` : "";
   return `<!DOCTYPE html>
 <html lang="${currentLang}">
 <head>
@@ -842,7 +844,7 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en"): strin
     </div>
   </div>
 
-  <script>
+  <script${safeNonce}>
     function switchLang(lang) {
       const en = document.getElementById('content-en');
       const ja = document.getElementById('content-ja');

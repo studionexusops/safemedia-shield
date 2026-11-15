@@ -7,7 +7,7 @@
 
 import { TenantBillingState } from "./types";
 
-export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b8bca2d95a315f567e43b", feedToken: string = "", initialBilling?: Partial<TenantBillingState>): string {
+export function renderDashboardHtml(shop: string, apiKey: string = "", feedToken: string = "", initialBilling?: Partial<TenantBillingState>): string {
   const feedTokenQuery = feedToken ? `&token=${encodeURIComponent(feedToken)}` : "";
   const isSyncActive = initialBilling ? initialBilling.autoSyncEnabled !== false : true;
   const autosyncBadgeClass = isSyncActive
@@ -25,6 +25,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
   let planDescText = "Try up to 5 products risk-free. Activate your <strong>14-Day Free Trial ($65/mo)</strong> anytime to unlock unlimited ad-feed generation.";
   let planUsageBadgeClass = "hidden";
   let planUsageBadgeText = "";
+  let canaryQuotaDisplayClass = "text-xs text-gray-500 font-medium";
+  let canaryQuotaDisplayText = "Free Samples: 0/5 Used";
   let showTrialBtn = true;
   let showResumeBtn = false;
 
@@ -43,6 +45,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
       planUsageBadgeClass = "px-2.5 py-0.5 rounded-md font-bold text-xs bg-emerald-100 text-emerald-800 border border-emerald-300";
       planUsageBadgeText = `Monthly Usage: ${uCount} / ${iCount} Images${uCount > iCount ? " (Overage Active)" : ""}`;
       planDescText = "Full-catalog smart dual-feed active. 500 images/mo included ($0.05/image overage, capped at $100/mo).";
+      canaryQuotaDisplayClass = "hidden text-xs text-gray-500 font-medium";
       showTrialBtn = false;
       showResumeBtn = false;
     } else if (initialBilling.planStatus === "TRIAL_14D_ACTIVE" || initialBilling.planStatus === "TRIAL_ACTIVE") {
@@ -53,6 +56,9 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
       planUsageBadgeClass = "px-2.5 py-0.5 rounded-md font-bold text-xs bg-emerald-100 text-emerald-800 border border-emerald-300";
       planUsageBadgeText = `Trial Quota: ${tUsed} / ${tLimit} Used`;
       planDescText = "14-day free trial active. Up to 50 clean images generated free of charge.";
+      const cUsed = initialBilling.canaryUsedCount || 0;
+      const cLimit = initialBilling.canaryLimit || 5;
+      canaryQuotaDisplayText = `Free Samples: ${cUsed}/${cLimit} Used`;
       showTrialBtn = false;
       showResumeBtn = false;
     } else if (
@@ -64,6 +70,9 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
       planUsageBadgeClass = "px-2.5 py-0.5 rounded-md font-bold text-xs bg-amber-100 text-amber-900 border border-amber-300";
       planUsageBadgeText = "Trial Quota: 50 / 50 Images Used";
       planDescText = "50 free trial ad images generated! <strong>Activate your full subscription ($65/mo)</strong> now to resume immediate processing for your entire catalog.";
+      const cUsed = initialBilling.canaryUsedCount || 0;
+      const cLimit = initialBilling.canaryLimit || 5;
+      canaryQuotaDisplayText = `Free Samples: ${cUsed}/${cLimit} Used`;
       showTrialBtn = true;
       showResumeBtn = false;
     } else {
@@ -73,6 +82,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         ? "px-2.5 py-1 rounded-md font-bold bg-red-100 text-red-800"
         : "px-2.5 py-1 rounded-md font-bold bg-amber-100 text-amber-900";
       planBadgeText = `🎁 Free Sample Preview (${used} / ${limit} Used)`;
+      canaryQuotaDisplayText = `Free Samples: ${used}/${limit} Used`;
     }
   }
   return `<!DOCTYPE html>
@@ -362,30 +372,37 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           <!-- Channel Mapping & Feed Distribution Preview Sub-Card -->
           <div class="mt-2 pt-2 border-t border-gray-100 bg-slate-50 p-3 rounded-lg space-y-2">
             <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
-              <strong class="text-gray-900 font-bold" id="channel-mapping-lbl" data-i18n="channel_mapping_lbl">Ad Feed Channel Distribution Status:</strong>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <strong class="text-gray-900 font-bold" id="channel-mapping-lbl" data-i18n="channel_mapping_lbl">Ad Feed Channel Distribution Status (Supplemental Feeds):</strong>
+                <span id="feed-items-count-badge" class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">Supplemental Feed (Live)</span>
+              </div>
               <div class="flex items-center gap-2 text-[11px]">
-                <a href="/api/feed-preview.xml?shop=${shop}${feedTokenQuery}" target="_blank" class="text-emerald-700 hover:text-emerald-900 font-mono underline font-medium">RSS XML Feed ↗</a>
+                <a id="feed-xml-link" href="/api/feed-preview.xml?shop=${shop}${feedTokenQuery}" target="_blank" class="text-emerald-700 hover:text-emerald-900 font-mono underline font-medium">RSS XML Feed ↗</a>
                 <span>•</span>
-                <a href="/api/feed-preview?shop=${shop}${feedTokenQuery}" target="_blank" class="text-emerald-700 hover:text-emerald-900 font-mono underline font-medium">JSON Feed ↗</a>
+                <a id="feed-json-link" href="/api/feed-preview?shop=${shop}${feedTokenQuery}" target="_blank" class="text-emerald-700 hover:text-emerald-900 font-mono underline font-medium">JSON Feed ↗</a>
               </div>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
               <div class="bg-white p-2.5 rounded border border-gray-200 space-y-1">
                 <div class="flex items-center justify-between">
                   <span class="font-bold text-gray-800">🛍️ Google Shopping (GMC)</span>
-                  <span id="gmc-mapping-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">🟢 Mapped & Ready</span>
+                  <span id="gmc-mapping-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">🟢 Supplemental Feed Ready</span>
                 </div>
                 <div class="text-[11px] text-gray-500 font-mono">Target: <code class="text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded">g:image_link</code> ➔ safemedia.clean_ad_image_url</div>
-                <div class="text-[10px] text-gray-400">Channel App: Google & YouTube Channel / Google Merchant Center</div>
+                <div class="text-[10px] text-gray-400">Channel: Google Merchant Center (Supplemental Feed)</div>
               </div>
               <div class="bg-white p-2.5 rounded border border-gray-200 space-y-1">
                 <div class="flex items-center justify-between">
                   <span class="font-bold text-gray-800">📱 Meta Ad Feed (Facebook/IG)</span>
-                  <span id="meta-mapping-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">🟢 Mapped & Ready</span>
+                  <span id="meta-mapping-status" class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">🟢 Supplementary Feed Ready</span>
                 </div>
                 <div class="text-[11px] text-gray-500 font-mono">Target: <code class="text-emerald-700 bg-emerald-50 px-1 py-0.5 rounded">image_link</code> ➔ safemedia.clean_ad_image_url</div>
-                <div class="text-[10px] text-gray-400">Channel App: Facebook & Instagram / Meta Commerce Manager</div>
+                <div class="text-[10px] text-gray-400">Channel: Meta Commerce Manager (Supplementary Feed)</div>
               </div>
+            </div>
+            <div class="p-2 rounded bg-emerald-50/70 border border-emerald-200/60 text-[11px] text-emerald-900 flex items-start gap-1.5 leading-relaxed">
+              <span class="select-none">💡</span>
+              <span id="feed-supplemental-note" data-i18n="feed_supplemental_note">Supplemental Feed: Only products with AI-cleaned images are included, safely overwriting image attributes in GMC & Meta without altering other product data.</span>
             </div>
           </div>
         </div>
@@ -398,7 +415,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             <span class="step-badge text-xs px-2.5 py-0.5 rounded-md uppercase tracking-wide" data-i18n="step1_tag">Step 1 • Start Here</span>
             <span class="text-xs text-gray-500 font-medium" data-i18n="step1_risk_free">Risk-Free Verification</span>
           </div>
-          <span id="canary_quota_display" class="text-xs text-gray-500 font-medium">Free Samples: 0/5 Used</span>
+          <span id="canary_quota_display" class="${canaryQuotaDisplayClass}">${canaryQuotaDisplayText}</span>
         </div>
 
         <div class="layer-2-title pt-1">
@@ -471,6 +488,9 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           </button>
           <button onclick="resumeProtection()" id="btn-resume-circuit-step2" class="hidden px-3.5 py-2.5 text-xs md:text-sm font-bold rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm flex items-center gap-2 whitespace-nowrap">
             <span>▶️</span> <span id="lbl-resume-circuit-step2">Resume Protection</span>
+          </button>
+          <button onclick="cancelBatch()" id="btn-cancel-circuit-step2" class="hidden px-3.5 py-2.5 text-xs md:text-sm font-bold rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 border border-gray-300 shadow-sm flex items-center gap-2 whitespace-nowrap">
+            <span>⏹️</span> <span id="lbl-cancel-circuit-step2" data-i18n="step2_btn_cancel">Cancel Batch</span>
           </button>
         </div>
         <div id="step2-action-msg" class="hidden mb-3 text-xs rounded-lg p-3 border transition-all duration-200"></div>
@@ -643,6 +663,11 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
     let lastStatusData = null;
     let cachedAvailableSnapshots = [];
 
+    const urlParams = (typeof URLSearchParams !== 'undefined' && typeof window !== 'undefined' && window.location && window.location.search)
+      ? new URLSearchParams(window.location.search)
+      : null;
+    const appHost = urlParams ? (urlParams.get('host') || '') : '';
+
     async function apiFetch(url, options) {
       const opts = Object.assign({}, options || {});
       const headers = Object.assign({}, opts.headers || {});
@@ -653,7 +678,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             headers['Authorization'] = 'Bearer ' + sessionToken;
           }
         } catch (e) {
-          console.warn('[AppBridge] Failed to retrieve session token:', e);
+          console.warn('[AppBridge] Failed to retrieve session token');
         }
       }
       return fetch(url, Object.assign({}, opts, { headers }));
@@ -672,7 +697,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           data.error.includes('expired or re-installed')
         ))
       ) {
-        console.warn('[Self-Healing] Re-authorization required. Redirecting to Shopify OAuth...', data);
+        console.warn('[Self-Healing] Re-authorization required.');
         showNotification(
           'info',
           currentLang === 'ja' ? 'Shopify再接続中...' : 'Reconnecting with Shopify...',
@@ -680,7 +705,13 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             ? 'アプリの再インストールまたはセッション更新を検知しました。Shopifyの認可画面へ自動遷移します。'
             : 'Re-install or expired session detected. Automatically reconnecting with Shopify authorization...'
         );
-        const targetUrl = data.reauthUrl || ('/api/auth?shop=' + encodeURIComponent(shop));
+        let targetUrl = '/api/auth?shop=' + encodeURIComponent(shop) + (appHost ? '&host=' + encodeURIComponent(appHost) : '');
+        if (typeof data.reauthUrl === 'string' && data.reauthUrl.startsWith('/api/auth?')) {
+          targetUrl = data.reauthUrl;
+          if (appHost && !targetUrl.includes('host=')) {
+            targetUrl += '&host=' + encodeURIComponent(appHost);
+          }
+        }
         setTimeout(function() {
           open(targetUrl, '_top');
         }, 1200);
@@ -770,6 +801,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         step1_err_warming_up: "AI processing engine is warming up. Please wait a few moments and try again.",
         step1_err_limit_reached: "Free preview limit reached. Start your 14-day free trial to unlock unlimited processing.",
         step1_err_no_image: "No product image found. Please add an image to your product in Shopify before running the test.",
+        step1_err_invalid_image: "The product image could not be safely accessed. Please verify the image in Shopify.",
+        step1_err_temporary: "A temporary processing error occurred. Your store data remains completely safe. Please try again.",
         step1_btn_add_image: "Add Image in Shopify",
         step1_btn_retry: "Retry Now",
         step1_btn_trial: "Start 14-Day Free Trial",
@@ -782,6 +815,9 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         step2_desc: "Automatically backs up your store first, then generates clean ad-feed images in product metafields without altering storefront photos. You can stop the process immediately at any time.",
         step2_btn: "Start Full Catalog Batch Sync",
         step2_abort_btn: "Instant Stop (Circuit Breaker)",
+        step2_btn_cancel: "Cancel Batch",
+        step2_btn_cancelling: "Cancelling...",
+        batch_cancelled_msg: "✅ Batch sync cancelled and cleared. Safe operations resumed.",
         batch_status_processing: "Generating ad-feed clean images into product metafields...",
         batch_status_done: "🎉 All catalog ad feeds generated successfully!",
         batch_details_init: "Creating safety backup before generating ad feeds...",
@@ -819,7 +855,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         guide_step3_txt: "Back up store and write clean ad images to metafields.",
         guide_step4_lbl: "Step 4: Ad Mapping",
         guide_step4_txt: "Deliver clean image metafield to GMC & Meta ad feeds.",
-        channel_mapping_lbl: "Ad Feed Channel Distribution Status:",
+        channel_mapping_lbl: "Ad Feed Channel Distribution Status (Supplemental Feeds):",
+        feed_supplemental_note: "Supplemental Feed: Only products with AI-cleaned images are included, safely overwriting image attributes in GMC & Meta without altering other product data.",
         trial_modal_title: "14-Day Free Trial Required for Full Catalog Sync",
         trial_modal_desc: "Full catalog synchronization requires activating the 14-day free trial ($65/mo). Would you like to proceed to Shopify's official charge approval screen to start your free trial?",
         trial_modal_title_rollback: "14-Day Free Trial Required for Store Rollback",
@@ -906,6 +943,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         step1_err_warming_up: "AI処理エンジンを準備（ウォームアップ）中です。数秒後にもう一度お試しください。",
         step1_err_limit_reached: "無料サンプルの利用上限に達しました。無制限で同期するには14日間の無料トライアルを開始してください。",
         step1_err_no_image: "商品画像が登録されていません。画像を登録してからテストを実行してください。",
+        step1_err_invalid_image: "商品画像URLにアクセスできませんでした。Shopify商品管理で画像をご確認ください。",
+        step1_err_temporary: "一時的な通信エラーが発生しました。ストアデータは安全に保護されています。もう一度お試しください。",
         step1_btn_add_image: "Shopifyで画像を追加",
         step1_btn_retry: "もう一度試す",
         step1_btn_trial: "14日間無料トライアルを開始",
@@ -918,6 +957,9 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         step2_desc: "開始前にストア全体を自動バックアップした上で、自社ストア画像は変更せず、全商品のメタフィールドへ広告用クリーン画像を一括保存します。処理中でもボタン1つで即座に停止できます。",
         step2_btn: "全商品の広告フィード用画像を生成",
         step2_abort_btn: "今すぐ緊急停止",
+        step2_btn_cancel: "バッチを完全停止",
+        step2_btn_cancelling: "完全停止中...",
+        batch_cancelled_msg: "✅ バッチ同期を完全停止し破棄しました。通常保護が有効です。",
         batch_status_processing: "全商品の広告用クリーン画像をメタフィールドへ生成中...",
         batch_status_done: "🎉 全商品の広告フィード用画像生成が完了しました！",
         batch_details_init: "広告用画像生成の前にセーフティバックアップを作成中...",
@@ -955,7 +997,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         guide_step3_txt: "ストア全体を安全に保存後、メタフィールドへ広告用画像を生成します。",
         guide_step4_lbl: "Step 4: 広告配信連携",
         guide_step4_txt: "クリーン画像メタフィールドをGMCおよびMeta広告へ自動配信します。",
-        channel_mapping_lbl: "広告フィード配信チャンネル連携状況:",
+        channel_mapping_lbl: "広告補助フィード配信チャンネル連携状況:",
+        feed_supplemental_note: "補助フィード仕様: AIクリーン画像が生成された商品のみが出力され、既存のShopify公式連携を壊さずに広告画像のみを安全に上書きします。",
         trial_modal_title: "全商品の一括処理には14日間無料トライアルが必要です",
         trial_modal_desc: "全商品の一括処理には14日間無料トライアル（月額 $65）の開始が必要です。Shopify公式の課金承認画面へ移動して無料トライアルを開始しますか？",
         trial_modal_title_rollback: "ストア復元機能のご利用には14日間無料トライアルが必要です",
@@ -993,8 +1036,72 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
     }
     const setLang = setLanguage;
 
+    function sanitizeUrl(rawUrl) {
+      if (!rawUrl || typeof rawUrl !== 'string') return '#';
+      const trimmed = rawUrl.trim();
+      if (trimmed.startsWith('/')) return sanitizeText(trimmed);
+      if (typeof URL !== 'undefined') {
+        try {
+          const parsed = new URL(trimmed);
+          if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+            return sanitizeText(parsed.href);
+          }
+        } catch (e) {
+          return '#';
+        }
+      } else if (
+        (trimmed.startsWith('https://') || trimmed.startsWith('http://')) &&
+        !trimmed.includes('<') &&
+        !trimmed.includes('>') &&
+        !trimmed.includes(' ')
+      ) {
+        return sanitizeText(trimmed);
+      }
+      return '#';
+    }
+
+    function isSafeBrowserUrl(rawUrl) {
+      if (!rawUrl || typeof rawUrl !== 'string') return false;
+      const trimmed = rawUrl.trim();
+      if (trimmed.startsWith('/')) return true;
+      if (typeof URL !== 'undefined') {
+        try {
+          const parsed = new URL(trimmed);
+          return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+        } catch (e) {
+          return false;
+        }
+      }
+      return (trimmed.startsWith('https://') || trimmed.startsWith('http://')) && !trimmed.includes('<') && !trimmed.includes('>') && !trimmed.includes(' ');
+    }
+
+    function sanitizeUiErrorMessage(raw) {
+      if (!raw || typeof raw !== 'string') {
+        return currentLang === 'ja'
+          ? '一時的な通信エラーが発生しました。ストアデータは安全に保護されています。'
+          : 'A temporary communication error occurred. Your store data remains completely safe.';
+      }
+      const trimmed = raw.trim();
+      if (
+        trimmed.startsWith('{') ||
+        trimmed.startsWith('[') ||
+        trimmed.includes('GraphQL error') ||
+        trimmed.includes('status=') ||
+        trimmed.length > 250
+      ) {
+        return currentLang === 'ja'
+          ? '一時的な通信エラーが発生しました。ストアデータは安全に保護されています。'
+          : 'A temporary communication error occurred. Your store data remains completely safe.';
+      }
+      return sanitizeText(raw);
+    }
+
     function showNotification(type, title, message) {
-      console.log('[' + type.toUpperCase() + '] ' + title + ': ' + message);
+      if (type === 'error') {
+        message = sanitizeUiErrorMessage(message);
+      }
+      const safeTitle = sanitizeText(title);
+      const safeMessage = type === 'error' ? message : sanitizeText(message);
       const container = document.getElementById('inline-notification-container');
       if (!container) return;
       container.classList.remove('hidden');
@@ -1012,8 +1119,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         '<div class="flex items-start gap-2.5">' +
           '<span class="text-base select-none">' + icon + '</span>' +
           '<div>' +
-            '<strong class="font-bold block">' + title + '</strong>' +
-            '<span class="leading-relaxed">' + message + '</span>' +
+            '<strong class="font-bold block">' + safeTitle + '</strong>' +
+            '<span class="leading-relaxed">' + safeMessage + '</span>' +
           '</div>' +
         '</div>' +
         '<button onclick="this.parentElement.remove()" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>' +
@@ -1219,25 +1326,53 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         const bMeta = item.beforeRevert && item.beforeRevert.cleanAdImageMetafield;
         const aMeta = item.afterRevert && item.afterRevert.cleanAdImageMetafield;
         const storefrontUrl = (item.afterRevert && item.afterRevert.storefrontImageUrl) || (item.beforeRevert && item.beforeRevert.storefrontImageUrl) || '';
-        const vCount = (item.afterRevert && item.afterRevert.variantCount) || (item.beforeRevert && item.beforeRevert.variantCount) || 0;
+        const vCount = Number((item.afterRevert && item.afterRevert.variantCount) || (item.beforeRevert && item.beforeRevert.variantCount) || 0);
+        const bVarCleaned = (item.beforeRevert && item.beforeRevert.cleanedVariantCount !== undefined)
+          ? Number(item.beforeRevert.cleanedVariantCount)
+          : (item.beforeRevert && item.beforeRevert.variantCleanImageMap ? Object.keys(item.beforeRevert.variantCleanImageMap).length : (bMeta ? vCount : 0));
+        const aVarCleaned = (item.afterRevert && item.afterRevert.cleanedVariantCount !== undefined)
+          ? Number(item.afterRevert.cleanedVariantCount)
+          : (item.afterRevert && item.afterRevert.variantCleanImageMap ? Object.keys(item.afterRevert.variantCleanImageMap).length : (aMeta ? vCount : 0));
+        const actionCode = (item.afterRevert && item.afterRevert.metafieldAction) || (aMeta ? 'RESTORED_TO_SNAPSHOT' : 'PURGED_TO_VIRGIN');
         const gmcBefore = (item.beforeRevert && item.beforeRevert.gmcImageLink) || '';
         const gmcAfter = (item.afterRevert && item.afterRevert.gmcImageLink) || '';
 
-        const bMetaDisplay = bMeta ? bMeta.split('/').pop() : 'None';
-        const aMetaDisplay = aMeta ? aMeta.split('/').pop() : (currentLang === 'ja' ? '初期状態（Metafield削除）' : 'Purged to Virgin');
-        const aGmcDisplay = gmcAfter ? gmcAfter.split('/').pop() : 'Default';
+        const bMetaDisplay = sanitizeText(bMeta ? bMeta.split('/').pop() : 'None');
+        const aMetaDisplay = sanitizeText(aMeta ? aMeta.split('/').pop() : (currentLang === 'ja' ? '初期状態（Metafield削除）' : 'Purged to Virgin'));
+        const bGmcDisplay = sanitizeText(gmcBefore ? gmcBefore.split('/').pop() : 'Default');
+        const aGmcDisplay = sanitizeText(gmcAfter ? gmcAfter.split('/').pop() : 'Default');
+        const safeProdTitle = sanitizeText(item.productTitle);
+        const safeProdId = sanitizeText(item.productId);
+        const safeStorefrontUrl = sanitizeUrl(storefrontUrl);
+        const safeBMetaAttr = sanitizeText(bMeta || 'null');
+        const safeAMetaAttr = sanitizeText(aMeta || 'Reverted');
+        const safeActionCode = sanitizeText(actionCode);
+        const safeSnapRef = sanitizeText(snapId.replace('snap_', '').replace('.json', ''));
+        const safeSnapIdFull = sanitizeText(snapId);
+        const safeRevertTimeShort = sanitizeText(new Date(revertTime).toLocaleTimeString());
+
+        const variantMetaSummary = vCount > 0
+          ? '<div class="text-[10px] text-slate-600 pt-0.5">' +
+              (currentLang === 'ja' ? 'バリアント: ' : 'Variants: ') + bVarCleaned + '/' + vCount + ' ➔ ' + aVarCleaned + '/' + vCount +
+              ' <span class="px-1 py-0.5 rounded bg-slate-100 text-slate-700 text-[9px]">' + safeActionCode + '</span>' +
+            '</div>'
+          : '';
+
+        const variantFeedSummary = vCount > 0
+          ? '<div class="text-[10px] text-emerald-700">' + aVarCleaned + '/' + vCount + (currentLang === 'ja' ? ' バリアント配信' : ' variant feed items') + '</div>'
+          : '';
 
         rowsHtml += '<tr class="hover:bg-slate-50 border-b border-gray-100 text-xs">' +
           '<td class="px-3 py-3 font-medium text-gray-900">' +
-            '<div class="font-semibold">' + item.productTitle + '</div>' +
-            '<div class="text-[10px] text-gray-400 font-mono truncate max-w-[140px]">' + item.productId + '</div>' +
+            '<div class="font-semibold">' + safeProdTitle + '</div>' +
+            '<div class="text-[10px] text-gray-400 font-mono truncate max-w-[140px]">' + safeProdId + '</div>' +
           '</td>' +
           '<td class="px-3 py-3">' +
             '<div class="flex items-center gap-1.5">' +
               '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">100% UNCHANGED</span>' +
             '</div>' +
             '<div class="mt-1">' +
-              '<a href="' + storefrontUrl + '" target="_blank" class="text-[11px] text-gray-600 hover:text-gray-900 underline font-mono truncate max-w-[150px] inline-block">' +
+              '<a href="' + safeStorefrontUrl + '" target="_blank" class="text-[11px] text-gray-600 hover:text-gray-900 underline font-mono truncate max-w-[150px] inline-block">' +
                 (currentLang === 'ja' ? '自社ストア画像 ↗' : 'Storefront Media ↗') +
               '</a>' +
             '</div>' +
@@ -1246,32 +1381,37 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             '<div class="space-y-1">' +
               '<div class="flex items-center gap-1.5 text-slate-500">' +
                 '<span class="text-[10px] uppercase font-bold text-slate-400">Before:</span> ' +
-                '<span class="truncate max-w-[130px]" title="' + (bMeta || 'null') + '">' + bMetaDisplay + '</span>' +
+                '<span class="truncate max-w-[130px]" title="' + safeBMetaAttr + '">' + bMetaDisplay + '</span>' +
               '</div>' +
               '<div class="flex items-center gap-1.5 text-emerald-700 font-semibold">' +
                 '<span class="text-[10px] uppercase font-bold text-emerald-600">After:</span> ' +
-                '<span class="truncate max-w-[130px]" title="' + (aMeta || 'Reverted') + '">' + aMetaDisplay + '</span>' +
+                '<span class="truncate max-w-[130px]" title="' + safeAMetaAttr + '">' + aMetaDisplay + '</span>' +
               '</div>' +
+              variantMetaSummary +
             '</div>' +
           '</td>' +
           '<td class="px-3 py-3 font-mono text-[11px]">' +
             '<div class="space-y-1">' +
               '<div class="flex items-center gap-1 text-[10px] text-slate-600">' +
-                '<span class="font-bold">GMC:</span> <span class="truncate max-w-[110px]">' + aGmcDisplay + '</span>' +
+                '<span class="font-bold">GMC:</span> <span class="truncate max-w-[140px]" title="' + sanitizeText(gmcBefore + ' -> ' + gmcAfter) + '">' + bGmcDisplay + ' ➔ ' + aGmcDisplay + '</span>' +
               '</div>' +
               '<div class="flex items-center gap-1 text-[10px] text-slate-600">' +
-                '<span class="font-bold">Meta:</span> <span class="truncate max-w-[110px]">' + aGmcDisplay + '</span>' +
+                '<span class="font-bold">Meta:</span> <span class="truncate max-w-[140px]">' + bGmcDisplay + ' ➔ ' + aGmcDisplay + '</span>' +
               '</div>' +
+              variantFeedSummary +
             '</div>' +
           '</td>' +
           '<td class="px-3 py-3">' +
             '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">' +
               '<span>🔗</span> <span>' + vCount + '/' + vCount + ' ' + (currentLang === 'ja' ? '連動保持' : 'Preserved') + '</span>' +
             '</span>' +
+            '<div class="text-[10px] text-emerald-700 mt-1 font-medium">' +
+              (currentLang === 'ja' ? '画像・Metafield同期済' : 'Media & Metafields Synced') +
+            '</div>' +
           '</td>' +
           '<td class="px-3 py-3 font-mono text-[10px] text-gray-500">' +
-            '<div class="font-semibold text-gray-700 truncate max-w-[100px]">' + snapId.replace('snap_', '').replace('.json', '') + '</div>' +
-            '<div class="text-[10px] text-gray-400">' + new Date(revertTime).toLocaleTimeString() + '</div>' +
+            '<div class="font-semibold text-gray-700 truncate max-w-[100px]">' + safeSnapRef + '</div>' +
+            '<div class="text-[10px] text-gray-400">' + safeRevertTimeShort + '</div>' +
           '</td>' +
         '</tr>';
       });
@@ -1298,7 +1438,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           '</summary>' +
           '<div class="p-4 border-t border-gray-200 space-y-3">' +
             '<p class="text-xs text-gray-500 font-mono">' +
-              snapLabel + ': ' + snapId + ' • ' + revertLabel + ': ' + new Date(revertTime).toLocaleString() +
+              snapLabel + ': ' + sanitizeText(snapId) + ' • ' + revertLabel + ': ' + sanitizeText(new Date(revertTime).toLocaleString()) +
             '</p>' +
             '<div class="overflow-x-auto max-h-72 overflow-y-auto border border-gray-200 rounded-lg">' +
               '<table class="min-w-full divide-y divide-gray-200 text-left text-xs">' +
@@ -1365,12 +1505,17 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           if (resumeBtnStep2) resumeBtnStep2.classList.remove('hidden');
           if (resumeLblStep2) resumeLblStep2.innerText = currentLang === 'ja' ? '保護を再開' : 'Resume Protection';
 
+          const cancelBtnStep2 = document.getElementById('btn-cancel-circuit-step2');
+          const cancelLblStep2 = document.getElementById('lbl-cancel-circuit-step2');
+          if (cancelBtnStep2) cancelBtnStep2.classList.remove('hidden');
+          if (cancelLblStep2) cancelLblStep2.innerText = t('step2_btn_cancel');
+
           const step2Msg = document.getElementById('step2-action-msg');
           if (step2Msg) {
             step2Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
             const s2txt = currentLang === 'ja'
-              ? '🛑 緊急停止中（自動処理一時停止）: すべてのバックグラウンド画像処理が安全に停止されています。「保護を再開」ボタンでいつでも再開できます。'
-              : '🛑 Emergency Stop Active (Paused): All background image processing is currently paused for safety. Click Resume Protection to continue.';
+              ? '🛑 緊急停止中（自動処理一時停止）: すべてのバックグラウンド画像処理が安全に停止されています。「保護を再開」または「バッチを完全停止」を選択できます。'
+              : '🛑 Emergency Stop Active (Paused): All background image processing is currently paused for safety. Click Resume Protection to continue or Cancel Batch to discard.';
             step2Msg.innerHTML = '<span>' + s2txt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             step2Msg.classList.remove('hidden');
           }
@@ -1378,6 +1523,12 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           if (resumeBtn) resumeBtn.classList.add('hidden');
           const resumeBtnStep2 = document.getElementById('btn-resume-circuit-step2');
           if (resumeBtnStep2) resumeBtnStep2.classList.add('hidden');
+          const cancelBtnStep2 = document.getElementById('btn-cancel-circuit-step2');
+          if (cancelBtnStep2) cancelBtnStep2.classList.add('hidden');
+          const canaryContainer = document.getElementById('canary-container');
+          if (canaryContainer && canaryContainer.innerHTML.includes('Emergency Stop is currently active')) {
+            canaryContainer.innerHTML = '';
+          }
           const step2Msg = document.getElementById('step2-action-msg');
           if (step2Msg && step2Msg.innerText.includes('Emergency Stop Active')) {
             step2Msg.classList.add('hidden');
@@ -1420,6 +1571,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             const cLimit = b.canaryLimit || 5;
             const quotaDisplay = document.getElementById('canary_quota_display');
             if (quotaDisplay) {
+              quotaDisplay.classList.remove('hidden');
               quotaDisplay.className = 'text-xs text-gray-500 font-medium';
               quotaDisplay.innerText = currentLang === 'ja'
                 ? '無料サンプル枠: ' + cUsed + ' / ' + cLimit + ' 件使用済'
@@ -1448,14 +1600,9 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
                 ? '月間利用数: ' + usageCount + ' / ' + includedCount + ' 枚' + (usageCount > includedCount ? ' (超過課金対象)' : '')
                 : 'Monthly Usage: ' + usageCount + ' / ' + includedCount + ' Images' + (usageCount > includedCount ? ' (Overage Active)' : '');
             }
-            const cUsed = b.canaryUsedCount || 0;
-            const cLimit = b.canaryLimit || 5;
             const quotaDisplay = document.getElementById('canary_quota_display');
             if (quotaDisplay) {
-              quotaDisplay.className = 'text-xs text-gray-500 font-medium';
-              quotaDisplay.innerText = currentLang === 'ja'
-                ? '無料サンプル枠: ' + cUsed + ' / ' + cLimit + ' 件使用済'
-                : 'Free Samples: ' + cUsed + ' / ' + cLimit + ' Used';
+              quotaDisplay.classList.add('hidden');
             }
           } else if (b.planStatus === 'TRIAL_14D_ACTIVE' || b.planStatus === 'TRIAL_ACTIVE') {
             const trialUsed = b.trialUsedCount || 0;
@@ -1484,6 +1631,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             const cLimit = b.canaryLimit || 5;
             const quotaDisplay = document.getElementById('canary_quota_display');
             if (quotaDisplay) {
+              quotaDisplay.classList.remove('hidden');
               quotaDisplay.className = 'text-xs text-gray-500 font-medium';
               quotaDisplay.innerText = currentLang === 'ja'
                 ? '無料サンプル枠: ' + cUsed + ' / ' + cLimit + ' 件使用済'
@@ -1516,6 +1664,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
 
             const quotaDisplay = document.getElementById('canary_quota_display');
             if (quotaDisplay) {
+              quotaDisplay.classList.remove('hidden');
               quotaDisplay.className = 'text-xs text-gray-500 font-medium';
               quotaDisplay.innerText = currentLang === 'ja'
                 ? '無料サンプル枠: ' + used + '/' + limit + '件使用済'
@@ -1577,6 +1726,14 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         }
       }
 
+      if (data.feedToken) {
+        const xmlLink = document.getElementById('feed-xml-link');
+        const jsonLink = document.getElementById('feed-json-link');
+        const tokenSuffix = '&token=' + encodeURIComponent(String(data.feedToken));
+        if (xmlLink) xmlLink.setAttribute('href', '/api/feed-preview.xml?shop=' + encodeURIComponent(shop) + tokenSuffix);
+        if (jsonLink) jsonLink.setAttribute('href', '/api/feed-preview?shop=' + encodeURIComponent(shop) + tokenSuffix);
+      }
+
       if (Array.isArray(data.availableSnapshots)) {
         cachedAvailableSnapshots = data.availableSnapshots;
       }
@@ -1618,7 +1775,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           const totalLen = descList.length;
           r2List.innerHTML = descList.map((o, idx) => {
             const rawKey = o.key || o;
-            const shortKey = typeof rawKey === 'string' ? rawKey.split('/').pop().replace('snap_', '').replace('.json', '') : rawKey;
+            const shortKey = sanitizeText(typeof rawKey === 'string' ? rawKey.split('/').pop().replace('snap_', '').replace('.json', '') : rawKey);
             let roleBadge = '';
             if (idx === 0 && totalLen === 1) {
               roleBadge = currentLang === 'ja' ? '🟢 最新 ＆ 🛡️ 初期原本 [Baseline]' : '🟢 Latest & 🛡️ Virgin Baseline';
@@ -1630,8 +1787,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
               roleBadge = currentLang === 'ja' ? '📦 過去バックアップ (直近' + (idx + 1) + '世代目)' : '📦 Recent Backup (Rolling #' + (idx + 1) + ')';
             }
             return '<div class="flex justify-between items-center bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-200">' +
-              '<span class="truncate text-emerald-800 font-medium text-xs">' + roleBadge + ' (' + shortKey + ')</span>' +
-              '<span class="text-gray-400 ml-2 whitespace-nowrap text-xs">' + (o.size ? (o.size / 1024).toFixed(1) + ' KB' : '') + '</span>' +
+              '<span class="truncate text-emerald-800 font-medium text-xs">' + sanitizeText(roleBadge) + ' (' + shortKey + ')</span>' +
+              '<span class="text-gray-400 ml-2 whitespace-nowrap text-xs">' + (o.size ? (Number(o.size) / 1024).toFixed(1) + ' KB' : '') + '</span>' +
               '</div>';
           }).join('');
         }
@@ -1661,22 +1818,38 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
               (activeProdId && p.productId === activeProdId) ||
               (activeProdTitle && p.productTitle === activeProdTitle)
             );
+            const safeTitle = sanitizeText(p.productTitle);
+            const safeStorefrontUrl = sanitizeUrl(p.storefrontImageUrl || p.dualFeedMetadata?.sourceImageUrl);
+            const safeCleanUrl = sanitizeUrl(p.cleanAdImageUrl);
+            const totalVarCount = Number(p.variantCount || (Array.isArray(p.variants) ? p.variants.length : 0));
+            const cleanedVarCount = Number(p.cleanedVariantCount !== undefined ? p.cleanedVariantCount : (Array.isArray(p.variants) ? p.variants.filter(v => Boolean(v.cleanAdImageUrl)).length : 0));
 
             let metafieldCell = 'Pending';
             let statusBadgeCell = '<span class="px-2 py-0.5 text-[11px] rounded bg-gray-100 text-gray-600">' + t('status_waiting') + '</span>';
 
             if (hasClean) {
-              metafieldCell = '<a href="' + p.cleanAdImageUrl + '" target="_blank" class="underline hover:text-emerald-900">safemedia.clean_ad_image_url ↗</a>';
+              const varMetaSub = cleanedVarCount > 0
+                ? '<div class="text-[10px] text-emerald-600 font-normal mt-0.5">' +
+                    (currentLang === 'ja' ? '親商品 + ' + cleanedVarCount + ' バリアント格納済' : 'Product + ' + cleanedVarCount + ' Variant Metafield' + (cleanedVarCount > 1 ? 's' : '')) +
+                  '</div>'
+                : '';
+              metafieldCell = '<a href="' + safeCleanUrl + '" target="_blank" class="underline hover:text-emerald-900">safemedia.clean_ad_image_url ↗</a>' + varMetaSub;
               statusBadgeCell = '<span class="px-2 py-0.5 text-[11px] rounded bg-emerald-100 text-emerald-800 font-semibold">' + t('status_clean_ready') + '</span>';
             } else if (isProcessingThis) {
               metafieldCell = '<span class="text-blue-600 font-medium animate-pulse">' + (currentLang === 'ja' ? 'AI画像生成中...' : 'Generating...') + '</span>';
               statusBadgeCell = '<span class="px-2 py-0.5 text-[11px] rounded bg-blue-100 text-blue-800 font-semibold animate-pulse">' + (currentLang === 'ja' ? '🔄 AI処理中...' : '🔄 Processing AI...') + '</span>';
             }
 
+            const variantBadge = totalVarCount > 0
+              ? (cleanedVarCount > 0
+                  ? '<div class="mt-1"><span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">📦 ' + cleanedVarCount + '/' + totalVarCount + (currentLang === 'ja' ? ' バリアント対応済' : ' Variants Cleaned') + '</span></div>'
+                  : '<div class="mt-1"><span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 text-gray-600">📦 ' + totalVarCount + (currentLang === 'ja' ? ' バリアント' : ' Variants') + '</span></div>')
+              : '';
+
             return '<tr>' +
-              '<td class="px-4 py-3 font-medium text-gray-900">' + p.productTitle + '</td>' +
+              '<td class="px-4 py-3 font-medium text-gray-900">' + safeTitle + variantBadge + '</td>' +
               '<td class="px-4 py-3 text-gray-500">' +
-                '<a href="' + (p.storefrontImageUrl || p.dualFeedMetadata?.sourceImageUrl) + '" target="_blank" class="underline hover:text-gray-800">' +
+                '<a href="' + safeStorefrontUrl + '" target="_blank" class="underline hover:text-gray-800">' +
                   t('label_storefront') +
                 '</a>' +
               '</td>' +
@@ -1695,32 +1868,86 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           const listToRender = withClean.length > 0 ? withClean : data.dualFeedProducts.slice(0, 3);
           dfList.innerHTML = listToRender.map(p => {
             const hasClean = Boolean(p.cleanAdImageUrl);
+            const safeTitle = sanitizeText(p.productTitle);
+            const safeStorefrontUrl = sanitizeUrl(p.storefrontImageUrl || p.dualFeedMetadata?.sourceImageUrl);
+            const safeCleanUrl = sanitizeUrl(p.cleanAdImageUrl);
+            const totalVarCount = Number(p.variantCount || (Array.isArray(p.variants) ? p.variants.length : 0));
+            const cleanedVarCount = Number(p.cleanedVariantCount !== undefined ? p.cleanedVariantCount : (Array.isArray(p.variants) ? p.variants.filter(v => Boolean(v.cleanAdImageUrl)).length : 0));
+
+            const variantPairs = [];
+            const seenPairKeys = new Set();
+            if (Array.isArray(p.variants)) {
+              p.variants.forEach(v => {
+                if (v.cleanAdImageUrl) {
+                  const origV = v.originalImageUrl || p.storefrontImageUrl || p.dualFeedMetadata?.sourceImageUrl || '';
+                  const pairKey = origV + '::' + v.cleanAdImageUrl;
+                  if (!seenPairKeys.has(pairKey)) {
+                    seenPairKeys.add(pairKey);
+                    variantPairs.push({
+                      titles: [v.variantTitle || 'Variant'],
+                      origUrl: origV,
+                      cleanUrl: v.cleanAdImageUrl
+                    });
+                  } else {
+                    const existing = variantPairs.find(vp => (vp.origUrl + '::' + vp.cleanUrl) === pairKey);
+                    if (existing && v.variantTitle && existing.titles.indexOf(v.variantTitle) === -1) {
+                      existing.titles.push(v.variantTitle);
+                    }
+                  }
+                }
+              });
+            }
+
+            const variantHeaderBadge = totalVarCount > 0
+              ? '<span class="px-2 py-0.5 text-[10px] rounded-full bg-slate-100 text-slate-700 font-semibold border border-slate-200">📦 ' + cleanedVarCount + '/' + totalVarCount + (currentLang === 'ja' ? ' バリアント' : ' Variants') + '</span>'
+              : '';
+
             const metaInfo = p.dualFeedMetadata
               ? (currentLang === 'ja'
-                  ? '⏱️ 処理時間: ' + (p.dualFeedMetadata.processingSec || '-') + '秒 • 除去領域: ' + (p.dualFeedMetadata.maskCoveragePct || '-') + '% • 🛡️ Google広告審査: 適合 (ポリシー準拠)'
-                  : '⏱️ Time: ' + (p.dualFeedMetadata.processingSec || '-') + 's • Badge Cleaned: ' + (p.dualFeedMetadata.maskCoveragePct || '-') + '% • 🛡️ Google Ads: Policy Compliant')
+                  ? '⏱️ 処理時間: ' + sanitizeText(p.dualFeedMetadata.processingSec || '-') + '秒 • 除去領域: ' + sanitizeText(p.dualFeedMetadata.maskCoveragePct || '-') + '% • 🛡️ Google広告審査: 適合 (ポリシー準拠)'
+                  : '⏱️ Time: ' + sanitizeText(p.dualFeedMetadata.processingSec || '-') + 's • Badge Cleaned: ' + sanitizeText(p.dualFeedMetadata.maskCoveragePct || '-') + '% • 🛡️ Google Ads: Policy Compliant')
               : (currentLang === 'ja' ? '商品画像の更新待機中' : 'Waiting for product image update');
+
+            let mediaPairsHtml = '';
+            if (hasClean && variantPairs.length > 1) {
+              mediaPairsHtml = '<div class="flex flex-wrap gap-2.5">' +
+                variantPairs.map(vp => {
+                  const safeVOrig = sanitizeUrl(vp.origUrl);
+                  const safeVClean = sanitizeUrl(vp.cleanUrl);
+                  const safeVLabel = sanitizeText(vp.titles.join(', '));
+                  return '<div class="bg-white p-2 rounded-xl border border-gray-200 shadow-sm space-y-1">' +
+                    '<div class="text-[10px] font-bold text-slate-700 truncate max-w-[160px]" title="' + safeVLabel + '">🎨 ' + safeVLabel + '</div>' +
+                    '<div class="flex items-center gap-2">' +
+                      '<a href="' + safeVOrig + '" target="_blank"><img src="' + safeVOrig + '" class="w-16 h-16 object-cover rounded-lg border border-gray-300" /></a>' +
+                      '<span class="text-emerald-600 font-bold text-sm">➔</span>' +
+                      '<a href="' + safeVClean + '" target="_blank"><img src="' + safeVClean + '" class="w-16 h-16 object-cover rounded-lg border-2 border-emerald-500" /></a>' +
+                    '</div>' +
+                  '</div>';
+                }).join('') +
+              '</div>';
+            } else if (hasClean) {
+              mediaPairsHtml = '<div class="flex items-center gap-3 bg-white p-2.5 rounded-xl border border-gray-200 shadow-sm">' +
+                '<div class="text-center"><span class="block text-[11px] text-gray-500 font-semibold mb-1">' + t('label_storefront') + '</span><a href="' + safeStorefrontUrl + '" target="_blank"><img src="' + safeStorefrontUrl + '" class="w-24 h-24 object-cover rounded-lg border border-gray-300" /></a></div>' +
+                '<span class="text-emerald-600 font-bold text-lg">➔</span>' +
+                '<div class="text-center"><span class="block text-[11px] text-emerald-700 font-bold mb-1">' + t('label_ad_feed') + '</span><a href="' + safeCleanUrl + '" target="_blank"><img src="' + safeCleanUrl + '" class="w-24 h-24 object-cover rounded-lg border-2 border-emerald-500" /></a></div>' +
+              '</div>';
+            }
 
             return '<div class="p-4 bg-emerald-50/40 rounded-xl border border-emerald-200 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">' +
               '<div class="space-y-1.5 flex-1 min-w-0">' +
                 '<div class="font-bold text-sm text-gray-900 flex flex-wrap items-center gap-2">' +
-                  '<span>' + p.productTitle + '</span>' +
+                  '<span>' + safeTitle + '</span>' +
                   (hasClean
                     ? '<span class="px-2.5 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800 font-bold">' + t('status_clean_ready') + '</span>'
                     : '<span class="px-2.5 py-0.5 text-xs rounded-full bg-gray-200 text-gray-600">' + t('status_waiting') + '</span>') +
+                  variantHeaderBadge +
                 '</div>' +
                 '<div class="text-xs text-gray-600 font-mono">' + metaInfo + '</div>' +
                 (hasClean
-                  ? '<div class="pt-1"><a href="' + p.cleanAdImageUrl + '" target="_blank" class="inline-flex items-center gap-1 text-xs text-emerald-700 hover:text-emerald-900 underline font-semibold">🔗 ' + t('label_open_clean') + ' (safemedia.clean_ad_image_url) ↗</a></div>'
+                  ? '<div class="pt-1"><a href="' + safeCleanUrl + '" target="_blank" class="inline-flex items-center gap-1 text-xs text-emerald-700 hover:text-emerald-900 underline font-semibold">🔗 ' + t('label_open_clean') + ' (safemedia.clean_ad_image_url) ↗</a></div>'
                   : '') +
               '</div>' +
-              (hasClean
-                ? '<div class="flex items-center gap-3 bg-white p-2.5 rounded-xl border border-gray-200 shadow-sm">' +
-                    '<div class="text-center"><span class="block text-[11px] text-gray-500 font-semibold mb-1">' + t('label_storefront') + '</span><a href="' + (p.storefrontImageUrl || p.dualFeedMetadata?.sourceImageUrl) + '" target="_blank"><img src="' + (p.storefrontImageUrl || p.dualFeedMetadata?.sourceImageUrl) + '" class="w-24 h-24 object-cover rounded-lg border border-gray-300" /></a></div>' +
-                    '<span class="text-emerald-600 font-bold text-lg">➔</span>' +
-                    '<div class="text-center"><span class="block text-[11px] text-emerald-700 font-bold mb-1">' + t('label_ad_feed') + '</span><a href="' + p.cleanAdImageUrl + '" target="_blank"><img src="' + p.cleanAdImageUrl + '" class="w-24 h-24 object-cover rounded-lg border-2 border-emerald-500" /></a></div>' +
-                  '</div>'
-                : '') +
+              mediaPairsHtml +
             '</div>';
           }).join('');
         }
@@ -1745,6 +1972,13 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
       }
 
       // Update Step Guide Badges and Feed Channel Mapping Status
+      const feedItemsBadge = document.getElementById('feed-items-count-badge');
+      if (feedItemsBadge && data.feedPreview && Array.isArray(data.feedPreview.items)) {
+        const itemCount = data.feedPreview.items.length;
+        feedItemsBadge.innerText = itemCount > 0
+          ? (currentLang === 'ja' ? '補助フィード (' + itemCount + ' バリアント配信中)' : 'Supplemental Feed (' + itemCount + ' Variant Items Live)')
+          : (currentLang === 'ja' ? '補助フィード (待機中)' : 'Supplemental Feed (Ready)');
+      }
       if (data.feedPreview && data.feedPreview.channelMappings) {
         const cm = data.feedPreview.channelMappings;
         const gmcStatus = document.getElementById('gmc-mapping-status');
@@ -1818,7 +2052,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           const z1Msg = document.getElementById('zone1-action-msg');
           if (z1Msg) {
             z1Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-            const errTxt = (currentLang === 'ja' ? '❌ 自動保護エラー: ' : '❌ Auto-Sync Error: ') + (data.error || 'Failed to toggle auto-protection');
+            const errTxt = (currentLang === 'ja' ? '❌ 自動保護エラー: ' : '❌ Auto-Sync Error: ') + sanitizeUiErrorMessage(data.error || 'Failed to toggle auto-protection');
             z1Msg.innerHTML = '<span>' + errTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             z1Msg.classList.remove('hidden');
           }
@@ -1828,7 +2062,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         const z1Msg = document.getElementById('zone1-action-msg');
         if (z1Msg) {
           z1Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-          const errTxt = (currentLang === 'ja' ? '❌ ネットワークエラー: ' : '❌ Network Error: ') + e.message;
+          const errTxt = (currentLang === 'ja' ? '❌ ネットワークエラー: ' : '❌ Network Error: ') + sanitizeUiErrorMessage(e && e.message);
           z1Msg.innerHTML = '<span>' + errTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
           z1Msg.classList.remove('hidden');
         }
@@ -1875,9 +2109,13 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
 
     async function resumeProtection() {
       const resumeBtnStep2 = document.getElementById('btn-resume-circuit-step2');
+      const cancelBtnStep2 = document.getElementById('btn-cancel-circuit-step2');
       if (resumeBtnStep2) {
         resumeBtnStep2.disabled = true;
         resumeBtnStep2.innerHTML = '<span class="animate-spin">⏳</span> ' + (currentLang === 'ja' ? '再開中...' : 'Resuming...');
+      }
+      if (cancelBtnStep2) {
+        cancelBtnStep2.disabled = true;
       }
       try {
         await apiFetch('/api/batch/resume', {
@@ -1900,6 +2138,57 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         if (resumeBtnStep2) {
           resumeBtnStep2.disabled = false;
           resumeBtnStep2.innerHTML = '<span>▶️</span> <span id="lbl-resume-circuit-step2">' + (currentLang === 'ja' ? '保護を再開' : 'Resume Protection') + '</span>';
+        }
+        if (cancelBtnStep2) {
+          cancelBtnStep2.disabled = false;
+        }
+      }
+      refreshStatus();
+    }
+
+    async function cancelBatch() {
+      const cancelBtnStep2 = document.getElementById('btn-cancel-circuit-step2');
+      const resumeBtnStep2 = document.getElementById('btn-resume-circuit-step2');
+      if (cancelBtnStep2) {
+        cancelBtnStep2.disabled = true;
+        cancelBtnStep2.innerHTML = '<span class="animate-spin">⏳</span> ' + t('step2_btn_cancelling');
+      }
+      if (resumeBtnStep2) {
+        resumeBtnStep2.disabled = true;
+      }
+      try {
+        await apiFetch('/api/batch/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ shop })
+        });
+        const step2Msg = document.getElementById('step2-action-msg');
+        if (step2Msg) {
+          step2Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-emerald-50 border-emerald-300 text-emerald-900 flex items-center justify-between gap-2';
+          const okTxt = t('batch_cancelled_msg');
+          step2Msg.innerHTML = '<span>' + okTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
+          step2Msg.classList.remove('hidden');
+        }
+        const canaryContainer = document.getElementById('canary-container');
+        if (canaryContainer && canaryContainer.innerHTML.includes('Emergency Stop is currently active')) {
+          canaryContainer.innerHTML = '';
+        }
+        const progressInner = document.getElementById('batch-progress-inner');
+        if (progressInner) {
+          progressInner.classList.add('hidden');
+        }
+      } catch (err) {
+        console.error('Cancel batch failed:', err);
+        showNotification('error', currentLang === 'ja' ? 'キャンセルエラー' : 'Cancellation Error', err.message);
+      } finally {
+        if (cancelBtnStep2) {
+          cancelBtnStep2.disabled = false;
+          cancelBtnStep2.innerHTML = '<span>⏹️</span> <span id="lbl-cancel-circuit-step2">' + t('step2_btn_cancel') + '</span>';
+          cancelBtnStep2.classList.add('hidden');
+        }
+        if (resumeBtnStep2) {
+          resumeBtnStep2.disabled = false;
+          resumeBtnStep2.classList.add('hidden');
         }
       }
       refreshStatus();
@@ -2044,13 +2333,24 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             rawLower.includes('limit reached') ||
             rawLower.includes('preview limit') ||
             rawLower.includes('trial limit');
-          const isWarmingUp = rawLower.includes('warming up') ||
+          const isWarmingUp =
+            dataCode === 'AI_WARMING_UP' ||
+            dataCode === 'AI_SERVICE_BUSY' ||
+            rawLower.includes('warming up') ||
             rawLower.includes('provisioning') ||
             rawLower.includes('initializing') ||
-            rawLower.includes('wait 10 seconds');
-          const isNoImage = (data && data.code === 'NO_PRODUCT_IMAGE') ||
+            rawLower.includes('wait 10 seconds') ||
+            rawLower.includes('in_progress') ||
+            rawLower.includes('missing processed image');
+          const isNoImage =
+            dataCode === 'NO_PRODUCT_IMAGE' ||
             rawLower.includes('no product image') ||
             rawError.includes('商品画像が登録されていません');
+          const isInvalidImage =
+            dataCode === 'INVALID_IMAGE_URL' ||
+            rawLower.includes('invalid image url') ||
+            rawLower.includes('ssrf') ||
+            rawLower.includes('inaccessible');
 
           const isTrialActive = lastStatusData && lastStatusData.billing && (
             lastStatusData.billing.planStatus === 'TRIAL_14D_ACTIVE' ||
@@ -2058,11 +2358,17 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             lastStatusData.billing.planStatus === 'ACTIVE'
           );
 
-          let displayMsg = rawError || t('step1_err_warming_up');
+          let displayMsg = t('step1_err_warming_up');
           let actionBtn = '<button onclick="runCanaryTest()" class="px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs whitespace-nowrap">🔄 ' + t('step1_btn_retry') + '</button>';
 
           if (isNoImage) {
             displayMsg = t('step1_err_no_image');
+            actionBtn = '<div class="flex items-center gap-2">' +
+              '<a href="https://' + encodeURIComponent(shop) + '/admin/products" target="_blank" rel="noopener noreferrer" class="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs whitespace-nowrap inline-flex items-center gap-1.5">📦 ' + t('step1_btn_add_image') + '</a>' +
+              '<button onclick="runCanaryTest()" class="px-3.5 py-2 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold text-xs whitespace-nowrap">🔄 ' + t('step1_btn_retry') + '</button>' +
+            '</div>';
+          } else if (isInvalidImage) {
+            displayMsg = t('step1_err_invalid_image');
             actionBtn = '<div class="flex items-center gap-2">' +
               '<a href="https://' + encodeURIComponent(shop) + '/admin/products" target="_blank" rel="noopener noreferrer" class="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs whitespace-nowrap inline-flex items-center gap-1.5">📦 ' + t('step1_btn_add_image') + '</a>' +
               '<button onclick="runCanaryTest()" class="px-3.5 py-2 rounded-lg bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold text-xs whitespace-nowrap">🔄 ' + t('step1_btn_retry') + '</button>' +
@@ -2079,6 +2385,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
               displayMsg = t('step1_err_limit_reached');
               actionBtn = '<button onclick="startFreeTrial()" class="px-3.5 py-2 rounded-lg bg-gray-900 hover:bg-gray-800 text-white font-bold text-xs whitespace-nowrap">🚀 ' + t('step1_btn_trial') + '</button>';
             }
+          } else {
+            displayMsg = t('step1_err_temporary');
           }
 
           container.innerHTML = '<div class="p-4 bg-amber-50 border border-amber-300 rounded-xl text-xs md:text-sm text-amber-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">' +
@@ -2090,7 +2398,10 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         canaryData = data;
         renderCanaryResult(data);
       } catch (err) {
-        container.innerHTML = '<div class="text-red-600 p-4 bg-red-50 rounded-lg text-xs">Error: ' + err.message + '</div>';
+        container.innerHTML = '<div class="p-4 bg-amber-50 border border-amber-300 rounded-xl text-xs md:text-sm text-amber-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">' +
+          '<div><strong>⚠️ ' + t('step1_err_temporary') + '</strong></div>' +
+          '<button onclick="runCanaryTest()" class="px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs whitespace-nowrap">🔄 ' + t('step1_btn_retry') + '</button>' +
+        '</div>';
       } finally {
         btn.disabled = false;
         btn.innerHTML = '<span>🔍</span> <span>' + t('step1_btn_rerun') + '</span>';
@@ -2103,7 +2414,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
       const checks = data.variantChecks || [];
       const variantButtons = checks.map((v, idx) =>
         '<button onclick="selectVariant(' + idx + ')" id="vbtn-' + idx + '" class="variant-pill px-3 py-1.5 text-xs font-semibold rounded-lg border ' + (idx === 0 ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50') + '">' +
-          (v.title || v.variantTitle || ('Variant ' + (idx + 1))) +
+          sanitizeText(v.title || v.variantTitle || ('Variant ' + (idx + 1))) +
         '</button>'
       ).join('');
 
@@ -2118,12 +2429,22 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         ? '👇 カラー・サイズボタンをクリックして、それぞれの画像が正しく連動するか確認できます：'
         : '👇 Click any variant option below to verify its linked photo stays intact:';
 
-      const cleanImg = data.cleanAdImageUrl || data.afterImageUrl || data.optimizedImageUrl || data.originalImageUrl;
-      const procSec = data.aiMetadata?.processingSec || data.processingSec || 4.8;
-      const maskPct = data.aiMetadata?.maskCoveragePct || data.maskCoveragePct || 1.6;
-      const engine = data.aiMetadata?.engine || data.engine || 'Florence-2 + LaMa';
-      const metafieldKey = data.metafieldKey || 'safemedia.clean_ad_image_url';
-      const activeFirstUrl = checks[0]?.activeImageUrl || checks[0]?.url || data.originalImageUrl;
+      const firstCheck = checks.length > 0 ? checks[0] : null;
+      const initialOrigRaw = (firstCheck && (firstCheck.originalImageUrl || firstCheck.activeImageUrl || firstCheck.url)) || data.originalImageUrl;
+      const initialCleanRaw = (firstCheck && firstCheck.cleanAdImageUrl) || data.cleanAdImageUrl || data.afterImageUrl || data.optimizedImageUrl || initialOrigRaw;
+      const cleanImg = sanitizeUrl(initialCleanRaw);
+      const origImg = sanitizeUrl(initialOrigRaw);
+      const safeProdTitle = sanitizeText(data.productTitle);
+      const procSec = sanitizeText(data.aiMetadata?.processingSec || data.processingSec || 4.8);
+      const maskPct = sanitizeText(data.aiMetadata?.maskCoveragePct || data.maskCoveragePct || 1.6);
+      const metafieldKey = sanitizeText(data.metafieldKey || 'safemedia.clean_ad_image_url');
+      const activeFirstUrl = sanitizeText(initialOrigRaw);
+      const activeFirstCleanUrl = sanitizeText(initialCleanRaw);
+      const variantPairedBadge = checks.length > 0
+        ? '<span class="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">' +
+            checks.length + (currentLang === 'ja' ? ' バリアントのBefore/Afterペア同期済' : ' Variants Paired (Before & After)') +
+          '</span>'
+        : '';
 
       container.innerHTML =
         '<div class="bg-gray-50 p-4 rounded-xl border border-gray-200 space-y-4">' +
@@ -2132,7 +2453,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             '<span class="font-bold">' + lblSuccessBanner + '</span>' +
           '</div>' +
           '<div class="flex flex-wrap items-center justify-between gap-2">' +
-            '<h3 class="font-bold text-gray-900 text-sm">' + lblProduct + ' ' + data.productTitle + '</h3>' +
+            '<h3 class="font-bold text-gray-900 text-sm">' + lblProduct + ' ' + safeProdTitle + '</h3>' +
             '<span class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold">' + lblBadge + '</span>' +
           '</div>' +
 
@@ -2140,7 +2461,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
             '<div class="bg-white p-3 rounded-lg border border-gray-200 space-y-2">' +
               '<span class="text-xs font-bold text-gray-600">' + lblBefore + '</span>' +
               '<div class="h-48 rounded bg-gray-100 overflow-hidden flex items-center justify-center">' +
-                '<img id="canary-orig-img" src="' + data.originalImageUrl + '" class="max-h-full object-contain" alt="Storefront Original" />' +
+                '<img id="canary-orig-img" src="' + origImg + '" class="max-h-full object-contain" alt="Storefront Original" />' +
               '</div>' +
               '<div class="text-xs text-gray-500 font-mono">' +
                 'Storefront view: Sale badge retained for high conversion.' +
@@ -2167,10 +2488,14 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
 
           '<!-- Interactive Variant Option Pills -->' +
           '<div class="p-3 bg-white rounded-lg border border-gray-200 space-y-2">' +
-            '<span class="text-xs font-bold text-gray-700 block">' + lblSwitch + '</span>' +
+            '<div class="flex flex-wrap items-center justify-between gap-2">' +
+              '<span class="text-xs font-bold text-gray-700">' + lblSwitch + '</span>' +
+              variantPairedBadge +
+            '</div>' +
             '<div class="flex flex-wrap gap-2">' + variantButtons + '</div>' +
-            '<div class="text-xs text-gray-500 pt-1 font-mono truncate">' +
-              'Linked Image: <span id="active-variant-img" class="text-emerald-700 font-semibold">' + activeFirstUrl + '</span>' +
+            '<div class="text-xs text-gray-500 pt-1 font-mono space-y-0.5">' +
+              '<div class="truncate">Storefront (Before): <span id="active-variant-img" class="text-gray-800 font-semibold">' + activeFirstUrl + '</span></div>' +
+              '<div class="truncate">Ad-Feed Metafield (After): <span id="active-variant-clean-img" class="text-emerald-700 font-semibold">' + activeFirstCleanUrl + '</span></div>' +
             '</div>' +
           '</div>' +
         '</div>';
@@ -2184,9 +2509,18 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           : 'variant-pill px-3 py-1.5 text-xs font-semibold rounded-lg border bg-white text-gray-700 border-gray-300 hover:bg-gray-50';
       });
       const check = canaryData.variantChecks[index];
-      const activeUrl = check.activeImageUrl || check.url || canaryData.originalImageUrl;
+      const activeUrl = check.activeImageUrl || check.originalImageUrl || check.url || canaryData.originalImageUrl;
+      const cleanVariantUrl = check.cleanAdImageUrl || canaryData.cleanAdImageUrl || canaryData.afterImageUrl || canaryData.optimizedImageUrl || activeUrl;
       document.getElementById('active-variant-img').innerText = activeUrl;
-      document.getElementById('canary-orig-img').src = activeUrl;
+      document.getElementById('canary-orig-img').src = isSafeBrowserUrl(activeUrl) ? activeUrl : '#';
+      const cleanImgEl = document.getElementById('canary-clean-img');
+      if (cleanImgEl) {
+        cleanImgEl.src = isSafeBrowserUrl(cleanVariantUrl) ? cleanVariantUrl : '#';
+      }
+      const activeCleanEl = document.getElementById('active-variant-clean-img');
+      if (activeCleanEl) {
+        activeCleanEl.innerText = cleanVariantUrl;
+      }
     }
 
     let batchInterval = null;
@@ -2247,7 +2581,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           const step2Msg = document.getElementById('step2-action-msg');
           if (step2Msg) {
             step2Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-            const errMsg = (currentLang === 'ja' ? '❌ バッチ開始エラー: ' : '❌ Batch Start Error: ') + (data.error || 'Failed to start batch sync');
+            const errMsg = (currentLang === 'ja' ? '❌ バッチ開始エラー: ' : '❌ Batch Start Error: ') + sanitizeUiErrorMessage(data.error || 'Failed to start batch sync');
             step2Msg.innerHTML = '<span>' + errMsg + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             step2Msg.classList.remove('hidden');
           }
@@ -2271,7 +2605,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         const step2Msg = document.getElementById('step2-action-msg');
         if (step2Msg) {
           step2Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-          const errMsg = (currentLang === 'ja' ? '❌ ネットワークエラー: ' : '❌ Network Error: ') + String(err);
+          const errMsg = (currentLang === 'ja' ? '❌ ネットワークエラー: ' : '❌ Network Error: ') + sanitizeUiErrorMessage(String(err));
           step2Msg.innerHTML = '<span>' + errMsg + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
           step2Msg.classList.remove('hidden');
         }
@@ -2306,13 +2640,15 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
       if (step2Msg) {
         step2Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
         const abortTxt = currentLang === 'ja'
-          ? '🛑 緊急停止しました（既存商品データはすべて保護されています）。下の「保護を再開」ボタンでいつでも再開できます。'
-          : '🛑 Stopped immediately — existing product images were not modified. Click Resume Protection below to restart anytime.';
+          ? '🛑 緊急停止しました（既存商品データはすべて保護されています）。下の「保護を再開」または「バッチを完全停止」を選択できます。'
+          : '🛑 Stopped immediately — existing product images were not modified. Click Resume Protection below to restart anytime or Cancel Batch to discard.';
         step2Msg.innerHTML = '<span>' + abortTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
         step2Msg.classList.remove('hidden');
       }
       const resumeBtnStep2 = document.getElementById('btn-resume-circuit-step2');
       if (resumeBtnStep2) resumeBtnStep2.classList.remove('hidden');
+      const cancelBtnStep2 = document.getElementById('btn-cancel-circuit-step2');
+      if (cancelBtnStep2) cancelBtnStep2.classList.remove('hidden');
 
       try {
         await apiFetch('/api/batch/abort', {
@@ -2409,7 +2745,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           const step3Msg = document.getElementById('step3-action-msg');
           if (step3Msg) {
             step3Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-emerald-50 border-emerald-300 text-emerald-900 flex items-center justify-between gap-2';
-            const okTxt = (currentLang === 'ja' ? '✅ ストア復元完了: ' : '✅ Store Restored Successfully: ') + (data.message || 'All media and metafields restored.') + (data.snapshotId ? ' (Snapshot: ' + data.snapshotId + ')' : '');
+            const okTxt = (currentLang === 'ja' ? '✅ ストア復元完了: ' : '✅ Store Restored Successfully: ') + sanitizeText(data.message || 'All media and metafields restored.') + (data.snapshotId ? ' (Snapshot: ' + sanitizeText(data.snapshotId) + ')' : '');
             step3Msg.innerHTML = '<span>' + okTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             step3Msg.classList.remove('hidden');
           }
@@ -2422,7 +2758,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           const step3Msg = document.getElementById('step3-action-msg');
           if (step3Msg) {
             step3Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-            const errTxt = (currentLang === 'ja' ? '❌ 復元エラー: ' : '❌ Rollback Error: ') + (data.error || 'Failed to rollback');
+            const errTxt = (currentLang === 'ja' ? '❌ 復元エラー: ' : '❌ Rollback Error: ') + sanitizeUiErrorMessage(data.error || 'Failed to rollback');
             step3Msg.innerHTML = '<span>' + errTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             step3Msg.classList.remove('hidden');
           }
@@ -2436,7 +2772,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         const step3Msg = document.getElementById('step3-action-msg');
         if (step3Msg) {
           step3Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-          const errTxt = (currentLang === 'ja' ? '❌ 復元エラー: ' : '❌ Rollback Error: ') + e.message;
+          const errTxt = (currentLang === 'ja' ? '❌ 復元エラー: ' : '❌ Rollback Error: ') + sanitizeUiErrorMessage(e && e.message);
           step3Msg.innerHTML = '<span>' + errTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
           step3Msg.classList.remove('hidden');
         }
@@ -2466,8 +2802,8 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           if (step3Msg) {
             step3Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-emerald-50 border-emerald-300 text-emerald-900 flex items-center justify-between gap-2';
             const okTxt = currentLang === 'ja'
-              ? '✅ バックアップ完了: 全' + data.totalProducts + '商品 (' + data.totalImages + '枚) の状態をクラウドに保存しました。'
-              : '✅ Backup Complete: Saved ' + data.totalProducts + ' products (' + data.totalImages + ' images) to cloud storage.';
+              ? '✅ バックアップ完了: 全' + Number(data.totalProducts || 0) + '商品 (' + Number(data.totalImages || 0) + '枚) の状態をクラウドに保存しました。'
+              : '✅ Backup Complete: Saved ' + Number(data.totalProducts || 0) + ' products (' + Number(data.totalImages || 0) + ' images) to cloud storage.';
             step3Msg.innerHTML = '<span>' + okTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             step3Msg.classList.remove('hidden');
           }
@@ -2482,7 +2818,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
           const step3Msg = document.getElementById('step3-action-msg');
           if (step3Msg) {
             step3Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-            const errTxt = (currentLang === 'ja' ? '❌ バックアップエラー: ' : '❌ Backup Error: ') + data.error;
+            const errTxt = (currentLang === 'ja' ? '❌ バックアップエラー: ' : '❌ Backup Error: ') + sanitizeUiErrorMessage(data.error);
             step3Msg.innerHTML = '<span>' + errTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             step3Msg.classList.remove('hidden');
           }
@@ -2492,7 +2828,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "e02dce6bc82b
         const step3Msg = document.getElementById('step3-action-msg');
         if (step3Msg) {
           step3Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-          const errTxt = (currentLang === 'ja' ? '❌ エラー: ' : '❌ Error: ') + e.message;
+          const errTxt = (currentLang === 'ja' ? '❌ エラー: ' : '❌ Error: ') + sanitizeUiErrorMessage(e && e.message);
           step3Msg.innerHTML = '<span>' + errTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
           step3Msg.classList.remove('hidden');
         }
