@@ -163,6 +163,7 @@ export interface TenantBillingState {
   circuitBreakerTripped: boolean;
   autoSyncEnabled?: boolean;
   webhookId?: string;
+  updatedAtMs?: number;
 }
 
 export interface GpuSlotLockRecord {

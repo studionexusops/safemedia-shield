@@ -1527,8 +1527,8 @@ class MockWorkerApp:
                         store.canary_used_count = max(0, store.canary_used_count - 1)
                         quota_reserved = False
                     return 400, json.dumps({
-                        "error": "商品画像が登録されていません。画像を登録してからテストを実行してください (No product image found. Please add an image to your product in Shopify before running the test).",
-                        "message": "商品画像が登録されていません。画像を登録してからテストを実行してください",
+                        "error": "No product image found. Please add an image to your product in Shopify before running the test.",
+                        "message": "No product image found. Please add an image to your product in Shopify before running the test.",
                         "code": "NO_PRODUCT_IMAGE",
                     }).encode("utf-8"), {**cors_headers, "Content-Type": "application/json"}
 

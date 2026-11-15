@@ -587,21 +587,33 @@ function getExistingCleanedUrlMap(prod?: ProductSnapshot | null): Record<string,
     }
   }
 
+  const hasCleanedUrlMap =
+    Boolean(prod.dualFeedMetadata?.cleanedImageUrls) &&
+    Object.keys(prod.dualFeedMetadata?.cleanedImageUrls || {}).length > 0;
+  const hasExplicitSourceMeta = Boolean(
+    prod.dualFeedMetadata?.sourceImageUrl || prod.dualFeedMetadata?.shopifyImageUrl
+  );
+
   if (prod.cleanAdImageUrl) {
-    const legacySources = [
-      prod.dualFeedMetadata?.sourceImageUrl,
-      prod.dualFeedMetadata?.shopifyImageUrl,
-      prod.originalMediaList?.[0]?.url,
-    ];
+    const legacySources =
+      hasCleanedUrlMap || hasExplicitSourceMeta
+        ? [prod.dualFeedMetadata?.sourceImageUrl, prod.dualFeedMetadata?.shopifyImageUrl]
+        : [
+            prod.dualFeedMetadata?.sourceImageUrl,
+            prod.dualFeedMetadata?.shopifyImageUrl,
+            prod.originalMediaList?.[0]?.url,
+          ];
     for (const src of legacySources) {
       setWithNormalized(src, prod.cleanAdImageUrl);
     }
   }
 
-  for (const v of prod.variants || []) {
-    const vClean = v.cleanAdImageUrl || prod.dualFeedMetadata?.variantCleanImageMap?.[v.variantId];
-    if (vClean && v.originalImageUrl) {
-      setWithNormalized(v.originalImageUrl, vClean);
+  if (!hasCleanedUrlMap && !hasExplicitSourceMeta) {
+    for (const v of prod.variants || []) {
+      const vClean = v.cleanAdImageUrl || prod.dualFeedMetadata?.variantCleanImageMap?.[v.variantId];
+      if (vClean && v.originalImageUrl) {
+        setWithNormalized(v.originalImageUrl, vClean);
+      }
     }
   }
 
@@ -632,6 +644,10 @@ function buildVariantCleanImageMap(
   const result: Record<string, string> = {};
   const primaryOrigUrl = prod.originalMediaList?.[0]?.url || "";
   const primaryNormKey = normalizeImageUrlKey(primaryOrigUrl);
+  const hasTrackedSourceUrls =
+    Object.keys(cleanedImageUrls).length > 0 ||
+    Boolean(prod.dualFeedMetadata?.cleanedImageUrls) ||
+    Boolean(prod.dualFeedMetadata?.sourceImageUrl || prod.dualFeedMetadata?.shopifyImageUrl);
 
   for (const v of prod.variants || []) {
     const vOrigUrl = v.originalImageUrl || primaryOrigUrl;
@@ -639,11 +655,18 @@ function buildVariantCleanImageMap(
       !v.originalImageUrl ||
       v.originalImageUrl === primaryOrigUrl ||
       (primaryNormKey !== "" && normalizeImageUrlKey(v.originalImageUrl) === primaryNormKey);
+    const directClean = lookupCleanedImageUrl(cleanedImageUrls, vOrigUrl);
+    const legacyVariantClean = !hasTrackedSourceUrls
+      ? v.cleanAdImageUrl || prod.dualFeedMetadata?.variantCleanImageMap?.[v.variantId]
+      : undefined;
+    const isPrimaryCleaned =
+      !hasTrackedSourceUrls ||
+      !primaryOrigUrl ||
+      Boolean(lookupCleanedImageUrl(cleanedImageUrls, primaryOrigUrl));
     const mapped =
-      lookupCleanedImageUrl(cleanedImageUrls, vOrigUrl) ||
-      v.cleanAdImageUrl ||
-      prod.dualFeedMetadata?.variantCleanImageMap?.[v.variantId] ||
-      (isSameAsPrimary ? fallbackPrimaryCleanUrl : undefined);
+      directClean ||
+      legacyVariantClean ||
+      (isSameAsPrimary && isPrimaryCleaned ? fallbackPrimaryCleanUrl : undefined);
     if (mapped) {
       result[v.variantId] = mapped;
     }
@@ -1929,7 +1952,10 @@ async function runBatchChunk(
 
         if (uncleanedImages.length === 0) {
           // All unique URLs already cleaned; ensure parent + variant metafields are synced (0 GPU cost)
-          const primaryCleanUrl = mergedCleanedMap[primarySrcUrl] || prod.cleanAdImageUrl || Object.values(mergedCleanedMap)[0];
+          const primaryCleanUrl =
+            lookupCleanedImageUrl(mergedCleanedMap, primarySrcUrl) ||
+            prod.cleanAdImageUrl ||
+            Object.values(mergedCleanedMap)[0];
           if (primaryCleanUrl) {
             const variantCleanImageMap = buildVariantCleanImageMap(prod, mergedCleanedMap, primaryCleanUrl);
             await variantManager.setCleanAdImageMetafield(
@@ -2121,8 +2147,7 @@ async function runBatchChunk(
 
         if (succeededInProd > 0) {
           const primaryCleanUrl =
-            mergedCleanedMap[primarySrcUrl] ||
-            prod.cleanAdImageUrl ||
+            lookupCleanedImageUrl(mergedCleanedMap, primarySrcUrl) ||
             Object.values(mergedCleanedMap)[0] ||
             primarySrcUrl;
           const variantCleanImageMap = buildVariantCleanImageMap(prod, mergedCleanedMap, primaryCleanUrl);
@@ -2223,15 +2248,25 @@ async function getShopBillingState(env: Env, shop: string): Promise<TenantBillin
       if (obj) {
         const parsed = (await obj.json()) as TenantBillingState;
         const cached = billingStatesByShop.get(shop);
-        // Safeguard: Ensure in-flight or in-memory quota reservations are never regressed by stale R2 reads
-        if (cached && cached.canaryUsedCount > (parsed.canaryUsedCount || 0)) {
-          parsed.canaryUsedCount = cached.canaryUsedCount;
-        }
-        if (cached && (cached.trialUsedCount || 0) > (parsed.trialUsedCount || 0)) {
-          parsed.trialUsedCount = cached.trialUsedCount;
-        }
-        if (cached && (cached.monthlyUsageCount || 0) > (parsed.monthlyUsageCount || 0)) {
-          parsed.monthlyUsageCount = cached.monthlyUsageCount;
+        // Safeguard: Use monotonic updatedAtMs so newer in-memory updates (reservations or refunds)
+        // are never regressed by stale R2 reads, while allowing legitimate quota refunds to take effect.
+        if (cached) {
+          const cachedTs = cached.updatedAtMs ?? 0;
+          const parsedTs = parsed.updatedAtMs ?? 0;
+          if (cachedTs > parsedTs) {
+            return cached;
+          }
+          if (cachedTs === 0 && parsedTs === 0) {
+            if (cached.canaryUsedCount > (parsed.canaryUsedCount || 0)) {
+              parsed.canaryUsedCount = cached.canaryUsedCount;
+            }
+            if ((cached.trialUsedCount || 0) > (parsed.trialUsedCount || 0)) {
+              parsed.trialUsedCount = cached.trialUsedCount;
+            }
+            if ((cached.monthlyUsageCount || 0) > (parsed.monthlyUsageCount || 0)) {
+              parsed.monthlyUsageCount = cached.monthlyUsageCount;
+            }
+          }
         }
         // Ensure default hybrid billing & trial cap fields are populated
         parsed.trialUsedCount = parsed.trialUsedCount ?? 0;
@@ -2277,12 +2312,16 @@ async function getShopBillingState(env: Env, shop: string): Promise<TenantBillin
 }
 
 async function saveShopBillingState(env: Env, state: TenantBillingState): Promise<void> {
+  const prevUpdatedAt = billingStatesByShop.get(state.shop)?.updatedAtMs ?? 0;
+  const nowMs = Date.now();
+  state.updatedAtMs = nowMs > prevUpdatedAt ? nowMs : prevUpdatedAt + 1;
   billingStatesByShop.set(state.shop, state);
   if (env.SNAPSHOT_BUCKET) {
     const r2Key = `state/${state.shop}/billing.json`;
     await env.SNAPSHOT_BUCKET.put(r2Key, JSON.stringify(state, null, 2), {
       httpMetadata: { contentType: "application/json" },
     });
+    billingStatesByShop.set(state.shop, state);
   }
 }
 
@@ -2587,6 +2626,13 @@ export default {
  * Prevents "admin.shopify.com refused to connect" (X-Frame-Options: DENY) browser errors.
  */
 function renderOAuthEscapeHtml(authUrl: string): string {
+  const safeJsUrl = JSON.stringify(authUrl).replace(/</g, "\\u003c");
+  const safeAttrUrl = authUrl
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -2594,7 +2640,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
   <title>Redirecting to Shopify Authorization...</title>
   <script>
     (function() {
-      var target = "${authUrl}";
+      var target = ${safeJsUrl};
       if (window.top && window.top !== window.self) {
         window.top.location.href = target;
       } else {
@@ -2608,7 +2654,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
     <div style="font-size: 36px; margin-bottom: 16px;">🔄</div>
     <h2 style="margin: 0 0 8px 0; font-size: 18px; font-weight: 600;">Connecting with Shopify...</h2>
     <p style="margin: 0 0 20px 0; font-size: 13px; color: #6d7175; line-height: 1.5;">Redirecting to Shopify's secure app authorization screen...</p>
-    <a href="${authUrl}" target="_top" style="display: inline-block; padding: 10px 20px; background-color: #008060; color: white; text-decoration: none; border-radius: 8px; font-size: 13px; font-weight: 600;">
+    <a href="${safeAttrUrl}" target="_top" style="display: inline-block; padding: 10px 20px; background-color: #008060; color: white; text-decoration: none; border-radius: 8px; font-size: 13px; font-weight: 600;">
       Click here if not redirected automatically
     </a>
   </div>
@@ -3801,8 +3847,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
         };
         const primarySrcUrl = cbProduct?.originalMediaList?.[0]?.url || callbackShopifyImg || targetSourceUrl;
         const primaryCleanUrl =
-          mergedCleanedMap[primarySrcUrl] ||
-          cbProduct?.cleanAdImageUrl ||
+          lookupCleanedImageUrl(mergedCleanedMap, primarySrcUrl) ||
           cleanResult.cleanAdImageUrl;
         const variantCleanImageMap = cbProduct
           ? buildVariantCleanImageMap(cbProduct, mergedCleanedMap, primaryCleanUrl)
@@ -4460,8 +4505,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
 
             if (syncCompletedCount > 0 && primaryCleanResult) {
               const primaryCleanUrl =
-                mergedCleanedMap[currentShopifyImg] ||
-                targetProd?.cleanAdImageUrl ||
+                lookupCleanedImageUrl(mergedCleanedMap, currentShopifyImg) ||
                 primaryCleanResult.cleanAdImageUrl;
               const variantCleanImageMap = targetProd
                 ? buildVariantCleanImageMap(targetProd, mergedCleanedMap, primaryCleanUrl)
@@ -4526,7 +4570,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             }
 
             const finalPrimaryCleanUrl =
-              mergedCleanedMap[currentShopifyImg] ||
+              lookupCleanedImageUrl(mergedCleanedMap, currentShopifyImg) ||
               primaryCleanResult?.cleanAdImageUrl ||
               Object.values(mergedCleanedMap)[0] ||
               "";
@@ -4865,8 +4909,9 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             return Response.json(
               {
                 error:
-                  "商品画像が登録されていません。画像を登録してから実行してください (No product image found. Please add an image to your product in Shopify before running cleanup).",
-                message: "商品画像が登録されていません。画像を登録してから実行してください",
+                  "No product image found. Please add an image to your product in Shopify before running cleanup.",
+                message:
+                  "No product image found. Please add an image to your product in Shopify before running cleanup.",
                 code: "NO_PRODUCT_IMAGE",
               },
               { status: 400, headers: corsHeaders }
@@ -4997,16 +5042,23 @@ function renderOAuthEscapeHtml(authUrl: string): string {
           }
 
           const mergedCleanedMap: Record<string, string> = { ...existingCleanedMap, ...newlyCleanedMap };
-          const primaryCleanUrl = mergedCleanedMap[storefrontImageUrl] || cleanResults[0]?.cleanAdImageUrl || storefrontImageUrl;
+          const primaryCleanUrl =
+            lookupCleanedImageUrl(mergedCleanedMap, storefrontImageUrl) ||
+            cleanResults[0]?.cleanAdImageUrl ||
+            storefrontImageUrl;
           const primaryResult = cleanResults[0];
           const maxProcessingSec =
-            cleanResults.length > 0 ? Math.max(...cleanResults.map((r) => r.processingSec || 0)) : 0;
+            cleanResults.length > 0
+              ? Math.max(...cleanResults.map((r) => r.processingSec || 0))
+              : targetProduct.dualFeedMetadata?.processingSec || 0;
           const avgMaskCoveragePct =
             cleanResults.length > 0
               ? Math.round(
                   (cleanResults.reduce((acc, r) => acc + (r.maskCoveragePct || 0), 0) / cleanResults.length) * 10
                 ) / 10
-              : 0;
+              : targetProduct.dualFeedMetadata?.maskCoveragePct || 0;
+          const resolvedEngine =
+            primaryResult?.engine || targetProduct.dualFeedMetadata?.engine || "Florence-2 + LaMa (cached)";
           const variantCleanImageMap = buildVariantCleanImageMap(
             targetProduct,
             mergedCleanedMap,
@@ -5022,7 +5074,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
               cleanedAt: new Date().toISOString(),
               maskCoveragePct: avgMaskCoveragePct,
               processingSec: maxProcessingSec,
-              engine: primaryResult?.engine || "Florence-2 + LaMa (cached)",
+              engine: resolvedEngine,
               cleanedImageUrls: mergedCleanedMap,
             },
             variantCleanImageMap
@@ -5049,7 +5101,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
               metafieldKey: "clean_ad_image_url",
               processingSec: maxProcessingSec,
               maskCoveragePct: avgMaskCoveragePct,
-              engine: primaryResult?.engine || "Florence-2 + LaMa (cached)",
+              engine: resolvedEngine,
               cleanedVariantCount: Object.keys(variantCleanImageMap).length,
               cleanedImageCount: Object.keys(mergedCleanedMap).length,
             },
@@ -5286,8 +5338,9 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             return Response.json(
               {
                 error:
-                  "商品画像が登録されていません。画像を登録してからテストを実行してください (No product image found. Please add an image to your product in Shopify before running the test).",
-                message: "商品画像が登録されていません。画像を登録してからテストを実行してください",
+                  "No product image found. Please add an image to your product in Shopify before running the test.",
+                message:
+                  "No product image found. Please add an image to your product in Shopify before running the test.",
                 code: "NO_PRODUCT_IMAGE",
               },
               { status: 400, headers: corsHeaders }
@@ -5310,6 +5363,11 @@ function renderOAuthEscapeHtml(authUrl: string): string {
           // Execute AI promo-badge removal pipeline with URL deduplication & bounded parallelism
           const existingCleanedMap = getExistingCleanedUrlMap(canaryProduct);
           const uncleanedImages = targetImages.filter((imgUrl) => !lookupCleanedImageUrl(existingCleanedMap, imgUrl));
+          if (uncleanedImages.length === 0 && quotaReserved) {
+            billingState.canaryUsedCount = Math.max(0, billingState.canaryUsedCount - 1);
+            await saveShopBillingState(env, billingState);
+            quotaReserved = false;
+          }
           const newlyCleanedMap: Record<string, string> = {};
           const imageResults: CleanAdImageResult[] = [];
 
@@ -5334,16 +5392,18 @@ function renderOAuthEscapeHtml(authUrl: string): string {
 
           const mergedCleanedMap: Record<string, string> = { ...existingCleanedMap, ...newlyCleanedMap };
           const targetImage = targetImages[0];
-          const primaryCleanUrl = mergedCleanedMap[targetImage] || targetImage;
+          const primaryCleanUrl = lookupCleanedImageUrl(mergedCleanedMap, targetImage) || targetImage;
           const primaryCleanResult = imageResults[0];
           const maxProcessingSec =
-            imageResults.length > 0 ? Math.max(...imageResults.map((r) => r.processingSec || 0)) : 0;
+            imageResults.length > 0
+              ? Math.max(...imageResults.map((r) => r.processingSec || 0))
+              : canaryProduct.dualFeedMetadata?.processingSec || 0;
           const avgMaskCoveragePct =
             imageResults.length > 0
               ? Math.round(
                   (imageResults.reduce((acc, r) => acc + (r.maskCoveragePct || 0), 0) / imageResults.length) * 10
                 ) / 10
-              : 0;
+              : canaryProduct.dualFeedMetadata?.maskCoveragePct || 0;
           const variantCleanImageMap = buildVariantCleanImageMap(
             canaryProduct,
             mergedCleanedMap,
@@ -5351,28 +5411,36 @@ function renderOAuthEscapeHtml(authUrl: string): string {
           );
 
           // Store clean ad image URLs in Shopify hidden metafields (parent + all variants, non-destructive)
-          try {
-            await variantManager.setCleanAdImageMetafield(
-              canaryProduct.productId,
-              primaryCleanUrl,
-              {
-                sourceImageUrl: targetImage,
-                shopifyImageUrl: targetImage,
-                cleanedAt: new Date().toISOString(),
-                maskCoveragePct: avgMaskCoveragePct,
-                processingSec: maxProcessingSec,
-                engine: primaryCleanResult?.engine || "Florence-2 + LaMa",
-                cleanedImageUrls: mergedCleanedMap,
-              },
-              variantCleanImageMap
+          const needsMetafieldSync =
+            uncleanedImages.length > 0 ||
+            canaryProduct.cleanAdImageUrl !== primaryCleanUrl ||
+            canaryProduct.variants.some(
+              (v) => variantCleanImageMap[v.variantId] && v.cleanAdImageUrl !== variantCleanImageMap[v.variantId]
             );
-            await snapshotEngine.clearRollbackRecordForProduct(canaryProduct.productId).catch(() => {});
+          if (needsMetafieldSync) {
+            try {
+              await variantManager.setCleanAdImageMetafield(
+                canaryProduct.productId,
+                primaryCleanUrl,
+                {
+                  sourceImageUrl: targetImage,
+                  shopifyImageUrl: targetImage,
+                  cleanedAt: new Date().toISOString(),
+                  maskCoveragePct: avgMaskCoveragePct,
+                  processingSec: maxProcessingSec,
+                  engine: primaryCleanResult?.engine || canaryProduct.dualFeedMetadata?.engine || "Florence-2 + LaMa",
+                  cleanedImageUrls: mergedCleanedMap,
+                },
+                variantCleanImageMap
+              );
+              await snapshotEngine.clearRollbackRecordForProduct(canaryProduct.productId).catch(() => {});
 
-            // Synchronize R2 Supplemental Ad-Feed cache immediately with the new clean items
-            await syncAdFeedToR2(env, requestedShop, url.origin, undefined, activeToken).catch(() => {});
-          } catch (metaErr: unknown) {
-            const metaErrMsg = metaErr instanceof Error ? metaErr.message : String(metaErr);
-            console.warn("[Canary] Failed to write preview metafield:", metaErrMsg);
+              // Synchronize R2 Supplemental Ad-Feed cache immediately with the new clean items
+              await syncAdFeedToR2(env, requestedShop, url.origin, undefined, activeToken).catch(() => {});
+            } catch (metaErr: unknown) {
+              const metaErrMsg = metaErr instanceof Error ? metaErr.message : String(metaErr);
+              console.warn("[Canary] Failed to write preview metafield:", metaErrMsg);
+            }
           }
 
           // Use actual product images from Shopify catalog (or AI cleaned result)
@@ -5385,7 +5453,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             const variantImg = v.originalImageUrl || targetImage;
             const variantCleanImg =
               variantCleanImageMap[v.variantId] ||
-              mergedCleanedMap[variantImg] ||
+              lookupCleanedImageUrl(mergedCleanedMap, variantImg) ||
               (variantImg === targetImage ? actualAfterUrl : variantImg);
             return {
               variantId: v.variantId,
@@ -5409,7 +5477,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             aiMetadata: {
               processingSec: maxProcessingSec || 3.2,
               maskCoveragePct: avgMaskCoveragePct || 4.8,
-              engine: primaryCleanResult?.engine || "Florence-2 + LaMa",
+              engine: primaryCleanResult?.engine || canaryProduct.dualFeedMetadata?.engine || "Florence-2 + LaMa",
             },
             variantChecks,
             canaryUsedCount: billingState.canaryUsedCount,

@@ -132,7 +132,7 @@ class TestCanaryProductSelection(unittest.TestCase):
         self.assertEqual(res.status_code, 400)
         data = res.json()
         self.assertEqual(data.get("code"), "NO_PRODUCT_IMAGE")
-        self.assertIn("商品画像が登録されていません", data.get("error", ""))
+        self.assertIn("No product image found.", data.get("error", ""))
 
         # Verify canary quota was not drained (refunded)
         status_after = self.client.get(f"/api/status?shop={PRIMARY_SHOP}").json()

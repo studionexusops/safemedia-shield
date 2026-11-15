@@ -148,7 +148,7 @@ graph LR
    - **Webhook べき等性キー管理 (Idempotency)**:
      - `X-Shopify-Webhook-Id` ヘッダーをキーとして直近処理済みWebhook ID（TTL 24時間）を記録し、Shopifyの再送による重複推論・GPU課金を完全排除。
    - **Anti-TOCTOU クォータ事前アトミック予約プロトコル**:
-     - `/api/canary/test`、`products/update` Webhook、および `/api/dual-feed/sync` の全推論エントリポイントにおいて、推論前に `canaryUsedCount += 1` を事前確保し、推論失敗時のみ返金（ロールバック）する2フェーズ予約で並行バースト漏洩を防御。
+     - `/api/canary/test`、`products/update` Webhook、および `/api/dual-feed/sync` の全推論エントリポイントにおいて、推論前に `canaryUsedCount += 1` を事前確保し、推論失敗時・事前検証エラー時・および全対象画像がクリーン済みで新規GPU推論が0回（キャッシュヒット）だった場合に返金（ロールバック）する2フェーズ予約で並行バースト漏洩と不要な枠消費を防御。
    - **緊急サーキットブレーカー**: `circuitBreakerTripped` フラグが有効な場合、新規Webhookやテスト要求を `423 Locked` で即時遮断。
    - **GDPR `shop/redact` 完全消去**: アンインストール後のデータ消去要求時、認証設定だけでなく R2 内の `snapshots/${shop}/*`、`clean_images/${shop}/*`、およびインメモリキャッシュを完全にパージ。
    - **BOLA (Broken Object Level Authorization) 完全防御**:
@@ -276,10 +276,10 @@ interface SanitizedErrorResponse {
      - `productId` が未指定の場合、**未クリーンアップ（メタフィールド未作成）商品を優先抽出**し、その中からバリアント数最大のものを自動選定（全件クリーン済みの場合は最多バリアントにフォールバック）。これにより、マーチャントが複数回テストを実行した際にも毎回異なる商品がテストされるUXを実現。
      - **画像未登録商品のフェイルセーフ防御**: 選定された商品（手動指定または自動選定）に画像が1枚も登録されていない場合、ダミー画像での処理を強行せず、即座に安全停止して先行クォータを返却し、HTTP `400 Bad Request`（`code: "NO_PRODUCT_IMAGE"`, メッセージ: `「商品画像が登録されていません。画像を登録してからテストを実行してください」`）を返却。UI側ではShopify商品管理へのリンクを表示。
   3. 代表画像および全バリアント固有画像（URL重複排除済 `uniqueImageUrls`、最大5ユニーク画像）のすべてに対して7層SSRF検査を実施。
-  4. RunPod Serverless GPU（Florence-2 OCR + Big-LaMa）を並列呼び出しし、代表画像および各バリアント固有のAIクリーン画像を生成。
-  5. 親商品および各バリアントの隠しメタフィールド（`safemedia.clean_ad_image_url`）と監査メタデータ（`dual_feed_metadata.cleanedImageUrls` / `variantCleanImageMap`）へ安全にプレビュー格納。
+  4. `dual_feed_metadata.cleanedImageUrls`（元画像URL ➔ クリーン画像URLの厳密な対応履歴）に基づき未処理画像（`uncleanedImages`）を判定。商品・バリアント画像が差し替えられた場合は、古いバリアントメタフィールド（`cleanAdImageUrl`）や親の古い `cleanAdImageUrl` フォールバックを新しい元画像URLへ誤って紐付けることなく確実に未処理と判定し（`buildVariantCleanImageMap` でもソースURL追跡情報がある場合は親画像が `cleanedImageUrls` に登録済みの場合のみ `fallbackPrimaryCleanUrl` を許可）、RunPod Serverless GPU（Florence-2 OCR + Big-LaMa）を並列呼び出しして各バリアント固有のAIクリーン画像を生成。一方、全ユニーク画像が既にクリーン済みで新規GPU推論が0回（`uncleanedImages.length === 0`）だった場合は、先行確保した `canaryUsedCount` クォータ枠を即座に返還（0消費）。
+  5. 親商品および各バリアントの隠しメタフィールド（`safemedia.clean_ad_image_url`）と監査メタデータ（`dual_feed_metadata.cleanedImageUrls` / `variantCleanImageMap`）へ安全にプレビュー格納。なお、`uncleanedImages.length === 0` かつ親・全バリアントのメタフィールドが既に最新と一致する場合は、冗長な Shopify GraphQL 書き込み・R2 フィード再同期をスキップして API レートリミットを保護する。
   6. 全バリアントの紐付け（MediaImage ID）が維持されているかを検証し、`variantChecks` に各バリアントの Before（`originalImageUrl`）と After（`cleanAdImageUrl`）を格納。
-  7. 処理不能エラー発生時は先行消費したクォータ枠をロールバック返却。
+  7. 処理不能エラー発生時、または新規GPU推論が0回（キャッシュヒット）の場合は先行確保したクォータ枠をロールバック返却。
 - **レスポンス (`CanaryTestResult`)**:
   ```typescript
   interface CanaryTestResult {
@@ -508,6 +508,7 @@ interface SanitizedErrorResponse {
     3. Anti-TOCTOU事前アトミック予約（`CANARY_TRIAL` 時は推論前に `canaryUsedCount += 1`、上限超過時は `402 Payment Required`、失敗時ロールバック）。
     4. In-Flight重複ロック（`${shop}:${productId}` でGPU多重課金を防止）。
     5. SSRF 7層フィルターによる入力画像URL検証。
+    6. 正規化URLルックアップ（`lookupCleanedImageUrl`）の統一適用と、全画像キャッシュヒット時（GPU推論0回時）の先行クォータ返還および既存 `dualFeedMetadata` 計測値（`processingSec`, `maskCoveragePct`, `engine`）の保持。
 - **`POST /api/snapshot/create`**: 手動による即時R2スナップショットバックアップ取得。
 - **`POST /api/rollback`**: スナップショット復元（リクエストボディまたは `?snapshotId=` クエリパラメータ指定対応）。
 - **`GET /clean-media/:shop/:filename`**: Cloudflare R2に保管された広告用クリーン画像を高速配信（パブリック配信許可、CDNキャッシュヘッダー付き）。
@@ -680,6 +681,7 @@ interface TenantBillingState {
   circuitBreakerTripped: boolean;           // 緊急停止フラグ
   autoSyncEnabled?: boolean;                // Webhook自動同期フラグ
   webhookId?: string;
+  updatedAtMs?: number;                     // 最終状態更新タイムスタンプ (Unix epoch ms, R2競合・クォータ返還巻き戻り防止用)
 }
 ```
 
@@ -1117,7 +1119,7 @@ Cloudflare Workersで動作するAPIゲートウェイは、ゼロトラスト�
 - **2フェーズ・アトミック予約プロトコル**:
   1. **Phase 1（事前予約）**: `canaryUsedCount >= canaryLimit`（5/5件）を判定し、空き枠がある場合は非同期AI推論の呼び出し前に即座に `canaryUsedCount += 1` をインクリメントして R2 に永続化保存。上限超過時は即座に **HTTP `402 Payment Required` (`TRIAL_QUOTA_EXCEEDED`)** を返却。
   2. **Phase 2（失敗時即時返金）**: 店舗に商品が存在しない場合（`NO_PRODUCTS_FOUND`）、画像URLがSSRFフィルターに抵触した場合（`INVALID_IMAGE_URL`）、またはRunPod推論エンジンで例外が発生した場合、`canaryUsedCount = Math.max(0, canaryUsedCount - 1)` により事前予約枠を即座に返金して R2 を更新。マーチャントの不当な枠喪失を防止。
-  3. **メモリキャッシュ保護**: `getShopBillingState()` において、古いR2読み出し値で並行中の予約済みカウンタが巻き戻らないよう `cached.canaryUsedCount > parsed.canaryUsedCount` ガードを常時維持。
+  3. **メモリキャッシュ保護（リビジョン優先ガード）**: `TenantBillingState` に単調増加の更新タイムスタンプ `updatedAtMs` を保持し、`getShopBillingState()` では `cached.updatedAtMs >= parsed.updatedAtMs`（未設定レガシー時は従来のカウンタ比較へフォールバック）の場合のみメモリキャッシュを優先することで、R2結果整合性による巻き戻りを防ぎつつ、クォータ返還（デクリメント）が古いメモリキャッシュで上書き・打ち消される競合を確実に防止。
   4. **並行バースト耐性実証**: クォータ4/5の状態で10並行リクエストを発行する過酷な負荷テスト（`test_adv_canary_02_concurrent_burst_at_boundary_quota_4_of_5`）において、**正確に1件のみが成功（200 OK）し、残る9件はすべて402で遮断**されることを実証済み。
 
 #### 7. In-Flight重複ロック & 自己発火ループ防止
@@ -1185,7 +1187,7 @@ stateDiagram-v2
 2. **5件カナリア枠（`CANARY_TRIAL`）＆ 50枚トライアルキャップ（`TRIAL_ACTIVE` / `TRIAL_14D_ACTIVE`）**:
    - 初期状態: `planStatus: "CANARY_TRIAL"`, `canaryUsedCount: 0`, `canaryLimit: 5`。未課金でのAI処理を最大5枚で物理遮断。
    - 14日間トライアル承認後: `planStatus: "TRIAL_14D_ACTIVE"`, `trialLimit: 50`。
-   - **カナリアテストの非消費特性**: カナリアテスト（`/api/canary/test`）は安全確認用のプレビュー機能であり、プランの画像処理枠（トライアル50枚枠 `trialUsedCount` および課金後の月間内包500枚枠 `monthlyUsageCount`）を一切消費しない。
+   - **カナリアテストの非消費特性**: カナリアテスト（`/api/canary/test`）は安全確認用のプレビュー機能であり、プランの画像処理枠（トライアル50枚枠 `trialUsedCount` および課金後の月間内包500枚枠 `monthlyUsageCount`）を一切消費しない。また、既に全バリアント画像がクリーンアップ済みの同一商品を再テストして新規GPU推論が0回だった場合は、先行確保した `canaryUsedCount` も即座に返還され無料サンプル枠を減らさない。
    - **14日間トライアル中のAbuse防御（5件セーフティリミット）**: 14日間トライアル中であっても、カナリアテストの無制限連打によるGPU原価高騰（Denial of Wallet）を防ぐため、トライアル中も最大5回までのカナリアプレビュー枠（`canaryUsedCount < canaryLimit`）で厳密にセーフティ保護。
    - 無料期間中の大量画像処理（Denial of Wallet）を完全に防ぐため、無料AI処理上限を **最大50枚** に物理制限。50枚到達時は `TRIAL_CAP_REACHED` へ遷移し、以降のGPU呼び出しを `HTTP 402 TRIAL_CAP_REACHED` で安全に遮断。
 3. **Webhook同時実行数リミッター（Concurrency Cap: 2並列）**:

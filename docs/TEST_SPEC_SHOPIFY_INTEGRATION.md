@@ -1,11 +1,11 @@
 # AdFeed Clean: Google Shopping — Shopify新規テストストア最終総合テスト仕様書
 ## (Final Release Candidate: New Test Store Integration, Full Variant AI Cleanup & Screencast Readiness Specification)
 
-> **文書バージョン**: 2.6.0 (Final Release Candidate — Full Variant Image AI Cleanup Alignment with `SYSTEM_DESIGN.md` v2.6.0 & `implementation_plan.md`)  
+> **文書バージョン**: 2.6.1 (Final Release Candidate — Full Variant Image AI Cleanup & Post-Phase-5 Hardening Alignment with `SYSTEM_DESIGN.md` v2.6.0 & `implementation_plan.md`)  
 > **最終更新日**: 2026-11-15  
 > **対象システム**: AdFeed Clean: Google Shopping (開発コードネーム: AdFeed Clean: Google Ad Shield / 旧称: SafeMedia Shield) for Shopify  
 > **対象環境**: **新規Shopify開発ストア (New Clean Test Store: `<NEW_TEST_STORE>.myshopify.com`)** 連携 実機テスト環境（検証実績ストア: `adfeed-clean-test-20261108.myshopify.com`, `adfeed-clean-test-20261108-2.myshopify.com`）  
-> **自動テストベースライン**: 全テストスイート・**363件 100% PASS**（統合4層E2E 78件、ディスカバリ 189件、全バリアント重複排除＆補助フィードライフサイクル、差分オラクル、DOM階層、116共通キー［実測122対称キー］I18N、敵対的セキュリティ監査 すべて合格済）  
+> **自動テストベースライン**: 全テストスイート・**363件 100% PASS**（`python3 -m unittest discover -s tests -p "*.py"`: 363件、4層統合E2E `test_pure_dual_feed_e2e.py`: 79件、E2Eディスカバリ `tests/e2e`: 191件 — 全バリアント重複排除＆補助フィードライフサイクル、差分オラクル、DOM階層、116共通キー［実測122対称キー］I18N、敵対的セキュリティ監査 すべて合格済）  
 > **準拠マスタードキュメント**:
 > - 統合システム設計書: [`docs/SYSTEM_DESIGN.md`](file:///Users/yusuke/antigravity/Micro-SaaS/docs/SYSTEM_DESIGN.md#L1-L45) v2.6.0
 > - アーキテクチャ＆実装計画書: [`docs/implementation_plan.md`](file:///Users/yusuke/antigravity/Micro-SaaS/docs/implementation_plan.md#L1-L322) (Phase 1〜5 全バリアント画像AIクリーンアップ拡張 ＆ 審査要件 4.5.3 完全準拠)
@@ -32,9 +32,9 @@
 
 | 領域 | 反映された最新仕様（`SYSTEM_DESIGN.md` v2.6.0 / `implementation_plan.md` 準拠） | 対応試験項目 |
 | :--- | :--- | :---: |
-| **OAuth & 二重レベルMetafield定義** | ・iframe脱出HTML (`renderOAuthEscapeHtml`) & ワンタイム `state` nonce<br>・OAuth完了時の `ensureCleanAdMetafieldDefinition()` にて **`PRODUCT` 用および `PRODUCTVARIANT` 用の `safemedia.clean_ad_image_url` (`pin: true`) を両方自動作成・ピン留め**<br>・`ShopifyAuthError` 検知時の R2 自動修復 (`clearInvalidShopAuth`) & `REAUTH_REQUIRED` 自動再認可<br>・再インストール時のトライアル悪用防止 (`firstInstalledAt`, `hasEverSubscribed` に基づく動的 `trialDays` 算出)<br>・`GET /api/billing/confirm` における実機 GraphQL `getActiveSubscription()` 照合必須化 | **A-1 〜 A-4** |
-| **全バリアント重複排除 & クォータ防衛** | ・親代表画像＋全バリアント固有画像（最大100バリアント `variants(first: 100)`）から `?v=` キャッシュバスターを正規化（`normalizeImageUrlKey`）した `uniqueImageUrls` を構築し、同一画像を共有する複数バリアントの二重GPU推論を100%排除<br>・カナリアテストは1商品につき `canaryUsedCount += 1`（最大 `MAX_CANARY_UNIQUE_IMAGES = 5` ユニーク画像まで並列推論、トライアル本枠 `trialUsedCount` は非消費）<br>・トライアル枠（50枚）および月間枠（500枚）は**新規AI推論したユニーク画像枚数**と1:1で計上 | **A-2, C-1, D-1, D-2, D-4** |
-| **UI/UX・I18N・全バリアント4.5.3フィード** | ・手動更新ボタン (`#btn_refresh`) 完全撤去、2-Zone・統一5層カード構造、日英バイリンガル完全対称辞書とゼロリロード動的切替 (`#lang-en`, `#lang-ja`)<br>・Step 1 のバリアント切替ピル（`.variant-pill` / `selectVariant(idx)`）クリック時に、**該当バリアントの Before（セール帯付き画像）と After（AI帯消去済クリーン画像）がペアで即座に切り替わる** 仕様<br>・署名トークン付き (`?token=...`) `/api/feed-preview.xml` および `/api/feed-preview` にて、**クリーン済商品の全バリアントを個別 `<item>`（`<g:id>shopify_US_{prodId}_{varId}</g:id>`, `<g:item_group_id>{prodId}</g:item_group_id>`, `<g:image_link>{variantCleanUrl}</g:image_link>`）として展開配信** | **B-1 〜 B-3, D-1** |
+| **OAuth & 二重レベルMetafield定義** | ・iframe脱出HTML (`renderOAuthEscapeHtml`) のJS/HTML属性XSSエスケープ強化 & ワンタイム `state` nonce<br>・OAuth完了時の `ensureCleanAdMetafieldDefinition()` にて **`PRODUCT` 用および `PRODUCTVARIANT` 用の `safemedia.clean_ad_image_url` (`pin: true`) を両方自動作成・ピン留め**<br>・`ShopifyAuthError` 検知時の R2 自動修復 (`clearInvalidShopAuth`) & `REAUTH_REQUIRED` 自動再認可<br>・再インストール時のトライアル悪用防止 (`firstInstalledAt`, `hasEverSubscribed` に基づく動的 `trialDays` 算出)<br>・`GET /api/billing/confirm` における実機 GraphQL `getActiveSubscription()` 照合必須化 | **A-1 〜 A-4** |
+| **全バリアント重複排除 & クォータ防衛** | ・親代表画像＋全バリアント固有画像（最大100バリアント `variants(first: 100)`）から `?v=` キャッシュバスターを正規化（`normalizeImageUrlKey` / `lookupCleanedImageUrl`）した `uniqueImageUrls` を構築し、同一画像を共有する複数バリアントの二重GPU推論を100%排除<br>・`getExistingCleanedUrlMap()` / `buildVariantCleanImageMap()` で `cleanedImageUrls` / `sourceImageUrl` 追跡情報がある場合は古いメタフィールドの新規差し替え画像への誤フォールバックを禁止し、差し替え画像を確実に再クリーン<br>・カナリアテストは1商品につき `canaryUsedCount += 1`（最大 `MAX_CANARY_UNIQUE_IMAGES = 5` ユニーク画像まで並列推論、トライアル本枠 `trialUsedCount` は非消費）。**全画像が既にクリーン済（キャッシュヒット・新規GPU推論0回）の場合は `canaryUsedCount` を即時返還（0消費）し、既にメタフィールド一致時は冗長なGraphQL/R2書き込みをスキップ＋既存計測値を保持**<br>・`TenantBillingState.updatedAtMs` 単調増加タイムスタンプによるメモリキャッシュ巻き戻り・クォータ返還打ち消し防止<br>・トライアル枠（50枚）および月間枠（500枚）は**新規AI推論したユニーク画像枚数**と1:1で計上 | **A-2, C-1, D-1, D-2, D-4, E-3** |
+| **UI/UX・I18N・全バリアント4.5.3フィード** | ・手動更新ボタン (`#btn_refresh`) 完全撤去、2-Zone・統一5層カード構造、日英バイリンガル完全対称辞書とゼロリロード動的切替 (`#lang-en`, `#lang-ja`)<br>・`NO_PRODUCT_IMAGE` APIエラーメッセージの英語標準化（UI側は `code: "NO_PRODUCT_IMAGE"` で日英I18N表示）<br>・Step 1 のバリアント切替ピル（`.variant-pill` / `selectVariant(idx)`）クリック時に、**該当バリアントの Before（セール帯付き画像）と After（AI帯消去済クリーン画像）がペアで即座に切り替わる** 仕様<br>・署名トークン付き (`?token=...`) `/api/feed-preview.xml` および `/api/feed-preview` にて、**クリーン済商品の全バリアントを個別 `<item>`（`<g:id>shopify_US_{prodId}_{varId}</g:id>`, `<g:item_group_id>{prodId}</g:item_group_id>`, `<g:image_link>{variantCleanUrl}</g:image_link>`）として展開配信** | **B-1 〜 B-3, C-1, D-1** |
 | **画像単位チャンク制御 & インラインUX** | ・Step 2 バッチ（`runBatchChunk`）において **1チャンク最大2商品または最大3ユニーク画像推論（`MAX_IMAGES_PER_CHUNK = 3` / 18秒バジェット）** で分割進行し、商品途中で上限に達した場合も `dualFeedMetadata.cleanedImageUrls` に保存して次チャンクでシームレス再開<br>・画像未登録商品に対する `400 NO_PRODUCT_IMAGE` 安全停止＆クォータ即時返還<br>・Zone 1 (`#zone1-action-msg`), Step 2 (`#step2-action-msg`), Step 3 (`#step3-action-msg`) のボタン直下インライン通知 ＆ Step 2 緊急停止時のカード内再開ボタン (`#btn-resume-circuit-step2`) | **C-1, D-2, E-1** |
 | **全バリアント世代管理復元 & 6列比較表** | ・**処女原本 (`Virgin Baseline`: `baseline.json`) 永続保護 ＋ 直近3世代ローテーション保持**（`StoreSnapshot` に親＋全バリアントの `cleanAdImageUrl` と `dualFeedMetadata.cleanedImageUrls` / `variantCleanImageMap` を保存）<br>・ロールバック時は親商品＋全バリアントのメタフィールドを一括復元（`RESTORED_TO_SNAPSHOT`）または Shopify `2024-10` `metafieldsDelete` で一括完全消去（`PURGED_TO_VIRGIN`）<br>・**6カラム構成「Rollback Before vs. After Product Data Comparison」テーブル (`#rollback-comparison-panel`)** にバリアント別クリーン件数（`cleanedVariantCount / variantCount`）を反映 | **D-3** |
 | **Zero-UI 全バリアント差分Webhook & SSRF** | ・`POST /webhooks/products/update` の外部I/O待機ゼロ **`< 50ms` 即時 200 OK (`accepted: true`)** 応答<br>・親＋全バリアントの `uniqueImageUrls` と `dualFeedMetadata.cleanedImageUrls` を差分比較し、**未処理のユニーク画像URL群のみ（1リクエスト最大 `MAX_SYNC_UNIQUE_IMAGES_PER_REQUEST = 6` 枚）** を非同期AI推論へ投入（全画像処理済みなら `already_cleaned_for_current_image` で0msスキップ）<br>・RunPod コールバック（`POST /webhooks/runpod/callback?imageUrl=...`）による画像別マージ更新＆親＋全該当バリアントMetafield一括更新<br>・**抽出された全バリアント画像URL（`uniqueImageUrls` 全件）に対する7層SSRF検証 (`isValidPublicImageUrl`)** | **E-2, F-1 〜 F-3** |
@@ -102,9 +102,9 @@ flowchart LR
 - **前提条件**: 新規テストストア（`<NEW_TEST_STORE>.myshopify.com`）にアプリが一度もインストールされていない状態。
 - **実施手順**:
   1. 【人間】ブラウザで `https://safemedia-shield-worker.safemedia.workers.dev/api/auth?shop=<NEW_TEST_STORE>.myshopify.com`（または `/login?shop=...`）にアクセスする。
-  2. 【人間】iframe脱出HTML（`renderOAuthEscapeHtml`）を経由して Shopify OAuth 認可画面（スコープ: `read_products`, `write_products`）が表示されることを確認し、「**Install（インストール）**」をクリックする。
+  2. 【人間】iframe脱出HTML（`renderOAuthEscapeHtml` — JS/HTML属性XSSエスケープ済）を経由して Shopify OAuth 認可画面（スコープ: `read_products`, `write_products`）が表示されることを確認し、「**Install（インストール）**」をクリックする。
   3. 【人間】Shopify Admin 内の埋め込みダッシュボードへリダイレクトされ、初期状態バナー `🎁 Free Sample Preview (0 / 5 Used)`（`CANARY_TRIAL`）が表示されることを確認する。
-  4. 【AI】Shopify Admin GraphQL API (`2024-10`) で `ensureCleanAdMetafieldDefinition()` により **親商品用（`ownerType: PRODUCT`）およびバリアント用（`ownerType: PRODUCTVARIANT`）の双方で `MetafieldDefinition`（`namespace: "safemedia"`, `key: "clean_ad_image_url"`, `type: "url"`, `pin: true`）が自動作成・ピン留めされていること**、および R2 `state/<NEW_TEST_STORE>/auth.json`・`billing.json` が生成されていることを確認する（参照: [`shopify.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts#L502-L575)）。
+  4. 【AI】Shopify Admin GraphQL API (`2024-10`) で `ensureCleanAdMetafieldDefinition()` により **親商品用（`ownerType: PRODUCT`）およびバリアント用（`ownerType: PRODUCTVARIANT`）の双方で `MetafieldDefinition`（`namespace: "safemedia"`, `key: "clean_ad_image_url"`, `type: "url"`, `pin: true`）が自動作成・ピン留めされていること**、および R2 `state/<NEW_TEST_STORE>/auth.json`・`billing.json` が生成されていることを確認する（参照: [`shopify.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts#L361-L466)）。
 - **正誤判定基準 (PASS条件)**:
   - OAuth コールバック（`/api/auth/callback`）で HMAC 検証・ワンタイム `state` nonce 消費・トークン交換が成功し、エラーなくダッシュボードが表示されること。
   - Shopify Admin の商品詳細ページおよび各バリアント詳細ページの「Metafields」欄に `Clean Ad Image URL`（`safemedia.clean_ad_image_url`）がピン留め表示されていること。
@@ -166,7 +166,7 @@ flowchart LR
   1. 【人間】4ステップ・ロードマップ（Step 1: Auto-Sync ➔ Step 2: Canary Test ➔ Step 3: Catalog Sync ➔ Step 4: Ad Mapping）と、その直下の「Ad Feed Channel Distribution Status」サブカード（全バリアント展開済みの適用アイテム数バッジ `#feed-items-count-badge` を含む）を確認する。
   2. 【人間】**Google Shopping (`g:image_link`)** および **Meta Ad Feed (`image_link`)** のステータスバッジと、`RSS XML Feed ↗`（`/api/feed-preview.xml?shop=...&token=...`）・`JSON Feed ↗`（`/api/feed-preview?shop=...&token=...`）のリンクをクリックして別タブで開く。
   3. 【AI】トークンなし・不正トークンでの `/api/feed-preview.xml` アクセスが `401 FEED_UNAUTHORIZED` で遮断されること（スクレイピング防御）、および正規トークン付きリクエストが R2 キャッシュ（`feeds/{shop}/google-shopping.xml` / `feed.json`）から Google Merchant Center 準拠の `<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">` XML を返すことを検証する。
-  4. 【AI】マルチバリアント商品（商品2等）がクリーンアップされた後、XMLフィード内に **全バリアント分の個別 `<item>`（`<g:id>shopify_US_{productId}_{variantId}</g:id>`, `<g:item_group_id>{productId}</g:item_group_id>`, および各バリアント固有のクリーン画像 `<g:image_link>{variantCleanUrl}</g:image_link>`）が展開出力されていること**を確認する（参照: [`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L760-L920)）。
+  4. 【AI】マルチバリアント商品（商品2等）がクリーンアップされた後、XMLフィード内に **全バリアント分の個別 `<item>`（`<g:id>shopify_US_{productId}_{variantId}</g:id>`, `<g:item_group_id>{productId}</g:item_group_id>`, および各バリアント固有のクリーン画像 `<g:image_link>{variantCleanUrl}</g:image_link>`）が展開出力されていること**を確認する（参照: [`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L683-L873)）。
 - **正誤判定基準 (PASS条件)**:
   - 審査員が1画面で「親および各バリアントのメタフィールド（`safemedia.clean_ad_image_url`）が Google `g:image_link` / `g:item_group_id` と Meta `image_link` にどうマッピングされるか」を確認でき、実際の全バリアント展開済み XML/JSON フィード出力が開けること。
 
@@ -190,12 +190,12 @@ flowchart LR
   1. 【人間】商品選択ドロップダウン（`#select-canary-product`）にストア内の商品一覧（`GET /api/products`）が読み込まれていることを確認する。
   2. 【人間】テスト商品 `The Complete Snowboard (Canary Test)` を選択し、「**🔍 Test on 1 Sample Product (Canary Preview)**（`#btn-run-canary`）」をクリックする。
   3. 【人間】完了後、Before（元のSALE帯付き画像 `#canary-orig-img`）と After（AIが文字・帯を消去したクリーン画像 `#canary-clean-img`）の並列表示、および **4大AIテレメトリバッジ**（⏱️ Processing Time、✂️ Badge Removed `%`、🧠 Engine `Florence-2 + LaMa`、🏷️ Metafield `safemedia.clean_ad_image_url`）を確認する。
-  4. 【AI】カナリアテスト実行後、`canaryUsedCount` が `1 / 5`（1商品のテストにつき `+1`、1回あたり最大 `MAX_CANARY_UNIQUE_IMAGES = 5` ユニーク画像まで対応）に増加する一方、**トライアル本枠（`trialUsedCount: 0 / 50`）は一切消費されていないこと（カナリア非消費特性）**を確認する。
-  5. 【人間 または AI】画像が登録されていない商品（商品4 `Empty Media Snowboard` 等）に対してカナリアテストを実行し、HTTP `400 Bad Request (code: "NO_PRODUCT_IMAGE")` で安全停止し、カナリア枠が消費されない（返還される）ことを確認する。
+  4. 【AI】カナリアテスト実行後、`canaryUsedCount` が `1 / 5`（1商品のテストにつき `+1`、1回あたり最大 `MAX_CANARY_UNIQUE_IMAGES = 5` ユニーク画像まで対応）に増加する一方、**トライアル本枠（`trialUsedCount: 0 / 50`）は一切消費されていないこと（カナリア非消費特性）**を確認する。さらに、**同じクリーン済み商品を再テスト（`uncleanedImages.length === 0`・キャッシュヒット）した場合に `canaryUsedCount` が即時返還（0消費）され、既にメタフィールド一致時は冗長な Shopify GraphQL `metafieldsSet` / `syncAdFeedToR2` がスキップされて既存 `aiMetadata` が保持されること**を確認する。
+  5. 【人間 または AI】画像が登録されていない商品（商品4 `Empty Media Snowboard` 等）に対してカナリアテストを実行し、HTTP `400 Bad Request`（`code: "NO_PRODUCT_IMAGE"`, 英語標準エラー `"No product image found. Please add an image to your product in Shopify before running the test."`）で安全停止し、カナリア枠が消費されない（返還される）ことを確認する。
 - **正誤判定基準 (PASS条件)**:
   - 推論が15秒以内（平均約4.75秒）に完了し、Before/After画像と4大テレメトリが鮮明に表示されること。
-  - `trialUsedCount` が `0 / 50` のまま維持されること。
-  - 画像未登録商品ではダミー処理を行わず、インライン警告とShopify商品管理リンクを表示して枠を返還すること。
+  - `trialUsedCount` が `0 / 50` のまま維持され、キャッシュヒット再テスト時は `canaryUsedCount` も増えない（返還される）こと。
+  - 画像未登録商品ではダミー処理を行わず、APIが英語標準の `NO_PRODUCT_IMAGE`（400）を返し、UI側がI18Nインライン警告とShopify商品管理リンクを表示して枠を返還すること。
 
 #### 【項目 C-2】実機RunPod Serverless GPU処理速度・画像品質・推論原価の定量判定
 - **実施主体**: **AI**
@@ -229,9 +229,9 @@ flowchart LR
 - **実施手順**:
   1. 【AI】処理前に3つのバリアント（`152cm - Sunset Orange`, `156cm - Arctic Blue`, `160cm - Stealth Black`）の `variantId`、`MediaImage` ID、および `originalImageUrl` のマッピングを記録する。
   2. 【人間】Step 1 ドロップダウンで `Multi-Variant Pro Snowboard (Variant Lock Test)` を選択し、カナリアプレビューを実行する。
-  3. 【AI】レスポンス `CanaryTestResult.variantChecks[]` の全3バリアントに、それぞれの `originalImageUrl`（セール帯付きBefore画像）と `cleanAdImageUrl`（AI帯消去済After画像）が格納されていること、さらに Shopify 上で親 `Product` と全3 `ProductVariant` の `safemedia.clean_ad_image_url` および `dual_feed_metadata`（`cleanedImageUrls`, `variantCleanImageMap`）が一括保存されていることを確認する（参照: [`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L1600-L1765)）。
-  4. 【人間】生成されたプレビュー下部の **バリアント切替ピル（`.variant-pill`）** を順番にクリック（`selectVariant(0)`, `selectVariant(1)`, `selectVariant(2)`）し、**クリックしたバリアントに応じて左側の Before 画像（`#canary-orig-img`: 各カラーのセール帯付き画像）と右側の After 画像（`#canary-clean-img`: 各カラーのAI帯消去済クリーン画像）がペアで即座に切り替わること**、および `✅ 100% Variant Links Preserved` 表示を確認する（参照: [`ui.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/ui.ts#L1405-L1455)）。
-  5. 【AI】処理後の GraphQL バリアント画像IDを照合し、紐付け喪失率が **0.0%** であることを確認する。
+  3. 【AI】レスポンス `CanaryTestResult.variantChecks[]` の全3バリアントに、それぞれの `originalImageUrl`（セール帯付きBefore画像）と `cleanAdImageUrl`（AI帯消去済After画像）が格納されていること、さらに Shopify 上で親 `Product` と全3 `ProductVariant` の `safemedia.clean_ad_image_url` および `dual_feed_metadata`（`cleanedImageUrls`, `variantCleanImageMap`）が一括保存されていることを確認する（参照: [`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L5218-L5533)）。
+  4. 【人間】生成されたプレビュー下部の **バリアント切替ピル（`.variant-pill`）** を順番にクリック（`selectVariant(0)`, `selectVariant(1)`, `selectVariant(2)`）し、**クリックしたバリアントに応じて左側の Before 画像（`#canary-orig-img`: 各カラーのセール帯付き画像）と右側の After 画像（`#canary-clean-img`: 各カラーのAI帯消去済クリーン画像）がペアで即座に切り替わること**、および `✅ 100% Variant Links Preserved` 表示を確認する（参照: [`ui.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/ui.ts#L2504-L2524)）。
+  5. 【AI】処理後の GraphQL バリアント画像IDを照合し、紐付け喪失率が **0.0%** であることを確認する。また、クリーン済み商品のいずれかのバリアント画像を別画像へ差し替えた場合、`getExistingCleanedUrlMap()` / `buildVariantCleanImageMap()` が古いメタフィールド（`cleanAdImageUrl`）を新画像へ誤ってフォールバック紐付けせず、差し替え画像のみを未処理（`uncleanedImages`）として検出し再クリーンすることを確認する。
 - **正誤判定基準 (PASS条件)**:
   - 全3バリアント固有画像が漏れなくAIクリーンアップされ、UIのバリアントピルをクリックすると各バリアントの Before（帯あり）と After（帯なし）がペアで切り替わること。
   - 全バリアントの `MediaImage` ID 紐付けが100%維持（喪失率 `0.0%`）され、1商品のカナリア実行として `canaryUsedCount` が `+1` のみ計上（`trialUsedCount` は `0` 維持）されること。
@@ -267,7 +267,7 @@ flowchart LR
      - `🛡️ Virgin Baseline`（アプリ導入直後の処女原本 `baseline.json`）
   5. 【人間】`🛡️ Virgin Baseline`（初期原本）を選択し、「**Yes, Restore Now**（`#btn-confirm-rollback`）」をクリックする。
   6. 【人間】10秒以内に復元が完了し、モーダルが閉じて Step 3 直下（`#step3-action-msg`）に完了通知が出るとともに、画面内に **6カラム構成の「Rollback Before vs. After Product Data Comparison」テーブル（`#rollback-comparison-panel`）** がインライン描画されることを確認する。
-  7. 【AI】Shopify GraphQL `2024-10` の `metafieldsDelete` ミューテーションにより、初期原本時点で存在しなかった **親 `Product` および全 `ProductVariant` のメタフィールド（`safemedia.clean_ad_image_url`, `safemedia.dual_feed_metadata`）が一括完全削除（`PURGED_TO_VIRGIN`）** され、全バリアントの `MediaImage` ID が100%保持されていること、R2補助フィード（`google-shopping.xml` / `feed.json`）も復元状態へ同期されていること、および4世代以上の古いスナップショット作成時に `baseline.json` を残して直近3世代へ自動ローテーションされることを確認する（参照: [`snapshot.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/snapshot.ts#L1-L320)）。
+  7. 【AI】Shopify GraphQL `2024-10` の `metafieldsDelete` ミューテーションにより、初期原本時点で存在しなかった **親 `Product` および全 `ProductVariant` のメタフィールド（`safemedia.clean_ad_image_url`, `safemedia.dual_feed_metadata`）が一括完全削除（`PURGED_TO_VIRGIN`）** され、全バリアントの `MediaImage` ID が100%保持されていること、R2補助フィード（`google-shopping.xml` / `feed.json`）も復元状態へ同期されていること、および4世代以上の古いスナップショット作成時に `baseline.json` を残して直近3世代へ自動ローテーションされることを確認する（参照: [`snapshot.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/snapshot.ts#L1-L785)）。
 - **正誤判定基準 (PASS条件)**:
   - 10秒以内に親商品＋全バリアントが完全ロールバックされ、**6カラム比較テーブル**に以下の全項目が正確に表示されること：
     1. **Product & ID**（商品名・GID）
@@ -312,14 +312,16 @@ flowchart LR
 - **正誤判定基準 (PASS条件)**:
   - HMAC不正は `401 INVALID_WEBHOOK_HMAC`、代表画像またはいずれかのバリアント画像に含まれるSSRF URLは `400 INVALID_IMAGE_URL`（クォータ即時返還）、他テナント/未認証アクセスは `403 CROSS_TENANT_ACCESS_DENIED`、ドメイン不一致は `400 SHOP_DOMAIN_MISMATCH` で100%遮断されること。
 
-#### 【項目 E-3】Webhook 2並列GPUスロット制限 ＆ Anti-TOCTOU 並行バースト耐性検証
+#### 【項目 E-3】Webhook 2並列GPUスロット制限・Anti-TOCTOU 並行バースト耐性・`updatedAtMs` リビジョン整合性検証
 - **実施主体**: **AI**
 - **実施手順**:
   1. 同一店舗に対して異なる商品の `products/update` Webhook を3件同時に送信し、GPUスロット制御（`locks/{shop}/gpu_slot_{1..2}.json`）を検証する。
   2. カナリア枠残り1件（`4 / 5`）の状態で並行リクエストを発行し、Anti-TOCTOU 事前アトミック予約を検証する。
+  3. 事前予約（`canaryUsedCount += 1`）後のエラー返還またはキャッシュヒット返還（`canaryUsedCount -= 1`）が、R2結果整合性やメモリキャッシュ（`getShopBillingState` / `saveShopBillingState`）の `updatedAtMs` 単調増加リビジョン比較によって巻き戻らず・打ち消されないことを検証する。
 - **正誤判定基準 (PASS条件)**:
   - 同時Webhookの3件目がエラーにならず HTTP `200 OK` `{ skipped: true, reason: "concurrency_limit_exceeded" }` で安全にスキップされること。
   - 境界バースト時に正確に1件のみが通過し、残りはすべて `402 TRIAL_QUOTA_EXCEEDED` で遮断されること。
+  - 返還後の `canaryUsedCount` が古いメモリキャッシュや古いR2読み取り値で再増加（上書き）されないこと。
 
 ---
 
@@ -353,7 +355,7 @@ flowchart LR
   1. 【人間】Zone 1 が `🟢 Active (ON)`（`autoSyncEnabled: true`）であることを確認する。
   2. 【人間】Shopify Admin の商品管理画面を開き、未クリーンアップ商品、または既存マルチバリアント商品の特定バリアントに新しいセール帯付き画像を追加・割り当てて「**Save（保存）**」をクリックする（※アプリ管理画面のボタンは一切操作しない）。
   3. 【AI】Shopify から送信された `POST /webhooks/products/update` に対し、Worker が外部I/Oを待たず **`< 50ms` で即座に HTTP `200 OK`（`accepted: true`）を返却**することを確認する。
-  4. 【AI】バックグラウンド処理（`ctx.waitUntil` またはコールドスタート時の `POST /webhooks/runpod/callback?imageUrl=...` + `claimWebhookCompletion`）において、親代表画像＋全バリアント固有画像から `uniqueImageUrls` を抽出し、`dualFeedMetadata.cleanedImageUrls` と比較して **未処理のユニーク画像URL群のみ（最大 `MAX_SYNC_UNIQUE_IMAGES_PER_REQUEST = 6` 枚）** をAIクリーンアップ ➔ R2保存 ➔ 親 `Product` および全該当 `ProductVariant` の `safemedia.clean_ad_image_url` 一括格納 ➔ R2補助フィード同期まで完遂したことを検証する（参照: [`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L2280-L2610)）。
+  4. 【AI】バックグラウンド処理（`ctx.waitUntil` またはコールドスタート時の `POST /webhooks/runpod/callback?imageUrl=...` + `claimWebhookCompletion`）において、親代表画像＋全バリアント固有画像から `uniqueImageUrls` を抽出し、`getExistingCleanedUrlMap()` + `lookupCleanedImageUrl()`（`?v=` キャッシュバスター正規化対応・差し替え時の誤紐付け防止）で `dualFeedMetadata.cleanedImageUrls` と比較して **未処理のユニーク画像URL群のみ（最大 `MAX_SYNC_UNIQUE_IMAGES_PER_REQUEST = 6` 枚）** をAIクリーンアップ ➔ R2保存 ➔ 親 `Product` および全該当 `ProductVariant` の `safemedia.clean_ad_image_url` 一括格納 ➔ R2補助フィード同期まで完遂したことを検証する（参照: [`index.ts`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/index.ts#L3692-L4670)）。
   5. 【AI】メタフィールド更新によって Shopify が自動再発火するエコー Webhook において、全ユニーク画像URLが `cleanedImageUrls` に登録済みであるため `already_cleaned_for_current_image`（または `duplicate_webhook_id`）により0ミリ秒で自動スキップされ、無限ループや二重課金が発生しないことを検証する。
   6. 【人間】約 5〜10 秒後にアプリダッシュボードの Zone 1 テーブル（`#synced_feed_table`）を確認し、該当商品が `✅ Clean Ad Image Ready` となり、Storefront 画像（セール帯付き）と Clean Ad-Feed 画像（帯消去済・全バリアント対応）が並列表示されていることを確認する。
 - **正誤判定基準 (PASS条件)**:
@@ -365,30 +367,30 @@ flowchart LR
 
 ## 4. 最終総合テスト実施結果 記録シート (Final Execution Sign-off Sheet)
 
-過去の総合テスト実績と、新規テストストアおよび全バリアント画像対応（v2.6.0）における総合テスト判定欄です。
+過去の総合テスト実績と、新規テストストアおよび全バリアント画像対応・Phase 5後ハードニング（v2.6.1）における総合テスト判定欄です。
 
-| 項目ID | 試験項目名称（v2.6.0 全バリアント対応版） | 実施主体 | 第1回・第2回実績 | 第3回 (新規ストア & 全バリアント拡張) | 実測値 / エビデンス・備考 |
+| 項目ID | 試験項目名称（v2.6.1 全バリアント対応＆Phase 5後ハードニング版） | 実施主体 | 第1回・第2回実績 | 第3回 (新規ストア & 全バリアント拡張) | 実測値 / エビデンス・備考 |
 | :---: | :--- | :---: | :---: | :---: | :--- |
-| **A-1** | 新規ストア OAuth 2.0 認可 & `PRODUCT` / `PRODUCTVARIANT` 二重 `MetafieldDefinition` ピン留め | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108.myshopify.com`: OAuth正常完了、`shpat_30bc` 保存確認、`PRODUCT` および `PRODUCTVARIANT` 双方の `MetafieldDefinition` (`clean_ad_image_url`, `pin: true`) 自動作成ロジック＆契約確認、`planStatus: CANARY_TRIAL` (0/5) 確認済 |
+| **A-1** | 新規ストア OAuth 2.0 認可 & `PRODUCT` / `PRODUCTVARIANT` 二重 `MetafieldDefinition` ピン留め | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108.myshopify.com`: OAuth正常完了、`shpat_30bc` 保存確認、`PRODUCT` および `PRODUCTVARIANT` 双方の `MetafieldDefinition` (`clean_ad_image_url`, `pin: true`) 自動作成ロジック＆契約確認、`planStatus: CANARY_TRIAL` (0/5) 確認済（Phase 5後 `renderOAuthEscapeHtml` XSSエスケープ強化反映済） |
 | **A-2** | 未課金 (`CANARY_TRIAL`) 時の3大共通課金ゲート (Zone 1/Step 2/Step 3) | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108.myshopify.com`: トグルロック確認、`/api/auto-sync/toggle` (402 SUBSCRIPTION_REQUIRED_FOR_AUTOSYNC)、`/api/batch/start` (402 SUBSCRIPTION_REQUIRED_FOR_BULK)、`/api/rollback` (402 SUBSCRIPTION_REQUIRED_FOR_ROLLBACK) 全3ゲート遮断確認済 |
 | **A-3** | ハイブリッド課金承認 (14日トライアル・50ユニーク画像上限) & 実機GraphQL照合 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108.myshopify.com`: AppSubscription `gid://shopify/AppSubscription/32213139549` 発行・承認完了、`planStatus: TRIAL_14D_ACTIVE`、`trialLimit: 50`、`monthlyIncludedCount: 500`、`autoSyncEnabled: true`、`hasEverSubscribed: true` 記録確認済 |
 | **A-4** | 自己修復エンジン (`REAUTH_REQUIRED`) & 再インストール悪用防止 | AI | PASS | **PASS** | `adfeed-clean-test-20261108.myshopify.com`: トークン失効時 `clearInvalidShopAuth` & `REAUTH_REQUIRED` 再認可誘導確認、実機 `hasEverSubscribed: true` 記録により再インストール時の無料トライアル悪用（`trialDays: 0` 強制）防止確認済 |
-| **B-1** | 英語標準 2-Zone・統一5層カード & 日英ゼロリロード切替 | 人間 | PASS | **未実施 (PENDING)** | `#btn_refresh` 不在、日英完全対称キー切替、`alert()` 不使用確認（自動テスト `test_m2_bilingual_parity.py` & `empirical_dom_challenger_m2.py` 28/28 PASS済） |
+| **B-1** | 英語標準 2-Zone・統一5層カード & 日英ゼロリロード切替 | 人間 | PASS | **未実施 (PENDING)** | `#btn_refresh` 不在、日英完全対称キー切替、`alert()` 不使用確認（自動テスト `test_m2_bilingual_parity.py` & `empirical_dom_challenger_m2.py` PASS済） |
 | **B-2** | 4ステップガイド & 全バリアント `<item>` 展開 XML/JSON 広告フィード検証 (4.5.3) | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108.myshopify.com` + `test_supplemental_feed_lifecycle.py`: トークンなし時 `401 FEED_UNAUTHORIZED` 遮断確認、署名トークン付き `/api/feed-preview.xml` にて全バリアント個別 `<item>` (`g:id=shopify_US_{prodId}_{varId}`, `g:item_group_id={prodId}`, `g:image_link={variantCleanUrl}`) 展開配信確認済 |
 | **B-3** | 公開プライバシーポリシー・利用規約・公式アセット配信 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108.myshopify.com`: `/privacy` (Zero-PII・日英切替), `/terms` ($65/9,800円上限・日英切替), HEAD 200 OK, 公式アセット (`app_icon_1200x1200.svg`, 各種プロモーションバナーSVG) パブリック高速CDN配信確認済 |
-| **C-1** | 1商品カナリアプレビュー・全バリアント並列推論・非消費特性・画像なしフェイルセーフ | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com`: `The Complete Snowboard (Canary Test)` (ID: `15499539185893`) でAI推論完了 (9.04s, mask 8.79%, 96.8KB JPEG)、1商品テストにつき `canaryUsedCount += 1`（最大5ユニーク画像対応）、**トライアル枠非消費 (`trialUsedCount: 0/50` 維持)**、画像未登録商品への `400 NO_PRODUCT_IMAGE` フェイルセーフ確認済 |
+| **C-1** | 1商品カナリアプレビュー・全バリアント並列推論・非消費/キャッシュ返還・画像なしフェイルセーフ | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com` + `test_canary_selection.py`: `The Complete Snowboard (Canary Test)` (ID: `15499539185893`) でAI推論完了 (9.04s, mask 8.79%, 96.8KB JPEG)、1商品テストにつき `canaryUsedCount += 1`（最大5ユニーク画像対応）、**トライアル枠非消費 (`trialUsedCount: 0/50` 維持)**、画像未登録商品への英語標準 `400 NO_PRODUCT_IMAGE` フェイルセーフ確認済。Phase 5後、キャッシュヒット再テスト（GPU推論0回）時の `canaryUsedCount` 返還・冗長書き込みスキップ・既存 `aiMetadata` 保持を実装 |
 | **C-2** | 実機RunPod GPU推論速度 (≦15秒) & 推論原価 (≦3円/枚) | AI | PASS (4.75s / 0.28円) | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com`: 実機RunPod推論秒数 `9.04秒` (≦15.0秒)、推論原価換算 `約0.43円/枚` (≦3.00円/枚)、生成画像 `96.8KB` 正常JPEG確認済 |
 | **C-3** | 自社ストアフロント画像非破壊 & 4列フィード証明テーブル・全バリアント比較ペア検証 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com`: 自社ストア表示画像（代表＋全バリアント）100%不変・非破壊確認、親 `Product` および各 `ProductVariant` の隠しメタフィールド (`safemedia.clean_ad_image_url`) にのみ広告用クリーン画像URLが分離格納されていることを照合確認済 |
-| **D-1** | 複数バリアント全画像AIクリーンアップ・紐付け保持 (0%喪失) & バリアントピルBefore/After切替 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com` + `test_canary_selection.py`: 全3バリアント (`152cm`, `156cm`, `160cm`) の固有画像クリーンアップ、`variantChecks[]` の `originalImageUrl` / `cleanAdImageUrl` ペア返却、`.variant-pill` (`selectVariant(idx)`) クリックによる Before/After ペア切替、**バリアント紐付け喪失率 0.0% (3/3 Preserved)** 確認済 |
-| **D-2** | 全カタログ画像単位チャンク一括同期・URL重複排除・リアルタイムETA・上部テーブル連動 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com` + `test_phase3_batch_sync_backend.py`: 全20商品のチャンク一括同期完了 (`MAX_IMAGES_PER_CHUNK = 3`, URL重複排除 `uniqueImageUrls` により同一画像の二重推論ゼロ)、新規推論ユニーク画像数のみ `trialUsedCount` へ1:1計上確認済 |
+| **D-1** | 複数バリアント全画像AIクリーンアップ・紐付け保持 (0%喪失) & バリアントピルBefore/After切替 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com` + `test_canary_selection.py` + `test_phase4_variant_ui.py`: 全3バリアント (`152cm`, `156cm`, `160cm`) の固有画像クリーンアップ、`variantChecks[]` の `originalImageUrl` / `cleanAdImageUrl` ペア返却、`.variant-pill` (`selectVariant(idx)`) クリックによる Before/After ペア切替、**バリアント紐付け喪失率 0.0% (3/3 Preserved)** 確認済（Phase 5後、`getExistingCleanedUrlMap` / `buildVariantCleanImageMap` の画像差し替え時誤フォールバック防止反映済） |
+| **D-2** | 全カタログ画像単位チャンク一括同期・URL重複排除・リアルタイムETA・上部テーブル連動 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com` + `test_phase3_batch_sync_backend.py`: 全20商品のチャンク一括同期完了 (`MAX_IMAGES_PER_CHUNK = 3`, URL重複排除 `uniqueImageUrls` + `lookupCleanedImageUrl` により同一画像の二重推論ゼロ)、新規推論ユニーク画像数のみ `trialUsedCount` へ1:1計上確認済 |
 | **D-3** | 世代管理 (`Virgin Baseline`+3世代)・全バリアント1クリック復元・6列比較表 (4.5.3) | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com`: `baseline.json` 永続保持＋直近3世代自動ローテーション確認。Virgin Baseline復元にて全20商品の親 `Product` ＋ 全 `ProductVariant` メタフィールド `PURGED_TO_VIRGIN` (`metafieldsDelete` 一括消去) 完了、バリアント紐付け喪失率 `0.0%`、自社ストア画像 `100% UNCHANGED`、6列比較テーブル (`cleanedVariantCount` 含む `productDataDiffs`) 生成確認済 |
 | **D-4** | 50枚トライアル上限到達 (`TRIAL_CAP_REACHED`) & 即時本契約昇格 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com`: 50/50ユニーク画像到達時の51枚目遮断 (HTTP 402 `TRIAL_CAP_REACHED`) 確認、`#trial-cap-modal` ➔ `POST /api/billing/activate-now` による `trialDays: 0` 本契約発行・Approve完了、AppSubscription `gid://shopify/AppSubscription/74947035365` 承認、`planStatus: ACTIVE` 昇格および月間500枚内包枠 (`0/500 Included`) 移行確認済 |
 | **E-1** | サーキットブレーカー即時中断 (バリアントループ内停止) & Step 2 カード内インライン再開 | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com`: 緊急停止中の `POST /api/canary/test` & `/api/dual-feed/sync` が HTTP `423 CIRCUIT_BREAKER_ACTIVE` で即座に遮断され GPU 未起動を確認後、`#btn-resume-circuit-step2` 押下で `circuitBreakerTripped: false` / `protectionActive: true` 復帰を確認済 |
 | **E-2** | ゼロトラスト多層防御 (HMAC・全バリアント7層SSRF・BOLA・HPP・動的CORS) | AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com` 本番Worker実測 + 自動テスト: HMAC不正 (`401 INVALID_WEBHOOK_HMAC`)、代表＋全バリアントURLに対する7層SSRF (`400 INVALID_IMAGE_URL` & クォータ返還)、BOLA未認証/他店舗トークン (`403 CROSS_TENANT_ACCESS_DENIED`)、HPPドメイン不一致 (`400 SHOP_DOMAIN_MISMATCH`) 100%遮断確認済 |
-| **E-3** | Webhook 2並列GPUスロット制限 & Anti-TOCTOU 並行バースト耐性 | AI | PASS | **PASS** | 自動テストスイート (`tests/test_billing_and_rate_limit.py`, `tests/e2e/test_adversarial_stress_m1.py`) にて `concurrency_limit_exceeded` (2並列超過時200スキップ) および `4/5` 境界バースト時の1件通過・残余 `402 TRIAL_QUOTA_EXCEEDED` 遮断を確認済 |
+| **E-3** | Webhook 2並列GPUスロット制限・Anti-TOCTOU 並行バースト耐性・`updatedAtMs` 整合性 | AI | PASS | **PASS** | 自動テストスイート (`tests/test_billing_and_rate_limit.py`, `tests/e2e/test_adversarial_stress_m1.py`) にて `concurrency_limit_exceeded` (2並列超過時200スキップ) および `4/5` 境界バースト時の1件通過・残余 `402 TRIAL_QUOTA_EXCEEDED` 遮断を確認済（Phase 5後、`TenantBillingState.updatedAtMs` 単調増加リビジョン比較による返還巻き戻り防止を実装） |
 | **F-1** | Auto-Protection トグル切替・直下インライン通知・R2状態同期 | 人間+AI | PASS | **未実施 (PENDING)** | `#zone1-action-msg` 表示、`billing.json` (`autoSyncEnabled`) 完全同期確認（自動テスト `test_spec_f1_to_f3.py` PASS済） |
 | **F-2** | Auto-Protection OFF (`⚪ Paused`) 時の Webhook 安全スキップ | 人間+AI | PASS | **PASS** | `adfeed-clean-test-20261108-2.myshopify.com`: `billing.json` (`autoSyncEnabled: false`) 同期下で商品更新後も `monthlyUsageCount: 6` 不変（クォータ消費0・GPU非起動）、未処理商品のメタフィールド未変更確認済（`auto_sync_disabled` 安全スキップ経路照合済） |
-| **F-3** | Auto-Protection ON (`🟢 Active`) Zero-UI全バリアント差分処理・Callback分離・ループ防止 | 人間+AI | PASS | **未実施 (PENDING)** | `<50ms` 即時応答、`uncleanedUrls` 差分抽出、RunPodコールバック (`?imageUrl=...`) による親＋全バリアントMetafield更新、`already_cleaned_for_current_image` ループ遮断確認（自動テスト `test_spec_f1_to_f3.py` PASS済） |
+| **F-3** | Auto-Protection ON (`🟢 Active`) Zero-UI全バリアント差分処理・Callback分離・ループ防止 | 人間+AI | PASS | **未実施 (PENDING)** | `<50ms` 即時応答、`uncleanedUrls` 差分抽出（`lookupCleanedImageUrl` 統一・画像差し替え時誤フォールバック防止）、RunPodコールバック (`?imageUrl=...`) による親＋全バリアントMetafield更新、`already_cleaned_for_current_image` ループ遮断確認（自動テスト `test_spec_f1_to_f3.py` PASS済） |
 
 ---
 
