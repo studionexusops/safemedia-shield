@@ -58,6 +58,7 @@ export interface CanaryVariantCheck {
   preserved: boolean;
   originalImageUrl?: string;
   cleanAdImageUrl?: string;
+  newlyCleaned?: boolean;
 
   // Backwards compatibility aliases for existing UI before M2
   variantTitle?: string;
@@ -84,6 +85,9 @@ export interface CanaryTestResult {
   variantChecks: CanaryVariantCheck[];
   canaryUsedCount: number;
   canaryLimit: number;
+  skipped?: boolean;
+  skipReason?: string;
+  newlyCleanedCount?: number;
 
   // Dual-Feed explicit aliases
   beforeImageUrl?: string;
@@ -212,12 +216,13 @@ export interface RollbackProductDataDiff {
     cleanAdImageMetafield: string | null;
     gmcImageLink: string;
     metaImageLink: string;
-    metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN";
+    metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN" | "SKIPPED_DELETED";
     variantCount: number;
     cleanedVariantCount?: number;
     variantCleanImageMap?: Record<string, string>;
     variantLinksPreserved: boolean;
   };
+  skipped?: boolean;
   clearedAfterRollback?: boolean;
 }
 
@@ -225,6 +230,8 @@ export interface RollbackExecutionResult {
   success: boolean;
   restoredCount: number;
   restoredProducts: number;
+  skippedCount?: number;
+  skippedProductIds?: string[];
   snapshotId: string;
   snapshotTimestamp: string;
   revertedAt: string;

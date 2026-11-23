@@ -626,10 +626,12 @@ export class ShopifyVariantManager {
   }
 
   /**
-   * Fetches a single product with its media, variants, and safemedia metafields.
-   * Significantly reduces Shopify GraphQL rate limit consumption compared to full-catalog scans.
+   * Fetches a single product with its media, variants, and safemedia metafields,
+   * returning explicit existence status ("exists" | "deleted" | "unknown") in a single GraphQL call.
    */
-  async fetchProductById(productId: string): Promise<ProductSnapshot | null> {
+  async fetchProductWithExistence(
+    productId: string
+  ): Promise<{ status: "exists"; product: ProductSnapshot } | { status: "deleted" } | { status: "unknown" }> {
     const gid = productId.startsWith("gid://shopify/Product/")
       ? productId
       : productId.startsWith("gid://")
@@ -637,9 +639,13 @@ export class ShopifyVariantManager {
       : `gid://shopify/Product/${productId}`;
 
     if (!this.accessToken || this.accessToken.startsWith("mock_")) {
-      const all = await this.fetchProductsWithVariants();
-      const match = all.find((p) => p.productId === gid || p.productId === productId);
-      return match || null;
+      try {
+        const all = await this.fetchProductsWithVariants();
+        const match = all.find((p) => p.productId === gid || p.productId === productId);
+        return match ? { status: "exists", product: match } : { status: "deleted" };
+      } catch {
+        return { status: "unknown" };
+      }
     }
 
     const query = `
@@ -700,12 +706,69 @@ export class ShopifyVariantManager {
 
     try {
       const json = await this.executeGraphQLWithBackoff<ProductByIdQueryResponse>(query, { id: gid }, "2024-10");
-      if (json.errors || !json.data?.product) {
-        return null;
+      if (json.errors) {
+        return { status: "unknown" };
       }
-      return this.mapGraphQLProductNode(json.data.product);
-    } catch {
-      return null;
+      if (!json.data?.product) {
+        return { status: "deleted" };
+      }
+      return { status: "exists", product: this.mapGraphQLProductNode(json.data.product) };
+    } catch (err: unknown) {
+      if (err instanceof ShopifyAuthError) throw err;
+      return { status: "unknown" };
+    }
+  }
+
+  /**
+   * Fetches a single product with its media, variants, and safemedia metafields.
+   * Significantly reduces Shopify GraphQL rate limit consumption compared to full-catalog scans.
+   */
+  async fetchProductById(productId: string): Promise<ProductSnapshot | null> {
+    const res = await this.fetchProductWithExistence(productId);
+    return res.status === "exists" ? res.product : null;
+  }
+
+  /**
+   * Lightweight existence check for a single product ID (used when catalog size >= 250
+   * or live catalog fetch failed). Distinguishes confirmed deletion from transient errors.
+   */
+  async checkProductExists(productId: string): Promise<"exists" | "deleted" | "unknown"> {
+    const gid = productId.startsWith("gid://shopify/Product/")
+      ? productId
+      : productId.startsWith("gid://")
+      ? productId
+      : `gid://shopify/Product/${productId}`;
+
+    if (!this.accessToken || this.accessToken.startsWith("mock_")) {
+      try {
+        const all = await this.fetchProductsWithVariants();
+        const found = all.some((p) => p.productId === gid || p.productId === productId);
+        return found ? "exists" : "deleted";
+      } catch {
+        return "unknown";
+      }
+    }
+
+    const query = `
+      query checkProductExists($id: ID!) {
+        product(id: $id) {
+          id
+        }
+      }
+    `;
+
+    try {
+      const json = await this.executeGraphQLWithBackoff<{
+        product?: { id: string } | null;
+      }>(query, { id: gid }, "2024-10");
+
+      if (json.errors) {
+        return "unknown";
+      }
+      return json.data?.product ? "exists" : "deleted";
+    } catch (err: unknown) {
+      if (err instanceof ShopifyAuthError) throw err;
+      return "unknown";
     }
   }
 
@@ -893,7 +956,7 @@ export class ShopifyVariantManager {
   private async deleteMetafieldIdentifiers(
     identifiers: Array<{ ownerId: string; namespace: string; key: string }>,
     contextLabel: string
-  ): Promise<{ success: boolean; deletedCount: number }> {
+  ): Promise<{ success: boolean; deletedCount: number; error?: string; ownerNotFound?: boolean }> {
     if (identifiers.length === 0) {
       return { success: true, deletedCount: 0 };
     }
@@ -926,10 +989,22 @@ export class ShopifyVariantManager {
 
       const userErrors = json.data?.metafieldsDelete?.userErrors;
       if (json.errors || (userErrors && userErrors.length > 0)) {
+        const serialized = JSON.stringify(json.errors || userErrors);
         console.warn(
           `[Shopify] metafieldsDelete returned errors for ${contextLabel}:`,
-          JSON.stringify(json.errors || userErrors)
+          serialized
         );
+        const errLower = serialized.toLowerCase();
+        const ownerNotFound =
+          errLower.includes("does not exist") ||
+          errLower.includes("not found") ||
+          errLower.includes("could not find");
+        return {
+          success: false,
+          deletedCount: totalDeleted,
+          error: serialized,
+          ...(ownerNotFound ? { ownerNotFound: true } : {}),
+        };
       }
 
       totalDeleted += json.data?.metafieldsDelete?.deletedMetafields?.length ?? 0;
@@ -939,12 +1014,51 @@ export class ShopifyVariantManager {
   }
 
   /**
+   * Deletes variant metafield identifiers resiliently: if a batch hits ownerNotFound
+   * because one or more variants were deleted in Shopify, retries per-variant so
+   * surviving variants are still cleared while confirmed-deleted variants are skipped.
+   * Non-ownerNotFound errors (rate limits, permissions, network) are always propagated.
+   */
+  private async deleteVariantMetafieldIdentifiersResilient(
+    identifiers: Array<{ ownerId: string; namespace: string; key: string }>,
+    contextLabel: string
+  ): Promise<{ success: boolean; deletedCount: number; error?: string; ownerNotFound?: boolean }> {
+    if (identifiers.length === 0) {
+      return { success: true, deletedCount: 0 };
+    }
+
+    const batchRes = await this.deleteMetafieldIdentifiers(identifiers, contextLabel);
+    if (batchRes.success || !batchRes.ownerNotFound) {
+      return batchRes;
+    }
+
+    if (identifiers.length === 1) {
+      return { success: true, deletedCount: 0 };
+    }
+
+    let deletedCount = 0;
+    for (const singleId of identifiers) {
+      const singleRes = await this.deleteMetafieldIdentifiers([singleId], `${contextLabel} (${singleId.ownerId})`);
+      if (singleRes.success) {
+        deletedCount += singleRes.deletedCount;
+      } else if (!singleRes.ownerNotFound) {
+        return {
+          success: false,
+          deletedCount,
+          error: singleRes.error,
+        };
+      }
+    }
+    return { success: true, deletedCount };
+  }
+
+  /**
    * Removes safemedia.clean_ad_image_url metafields from specific variants (e.g., partial snapshot rollback).
    */
   async clearVariantCleanAdImageMetafields(
     productId: string,
     variantIds: string[]
-  ): Promise<{ success: boolean; deletedCount?: number }> {
+  ): Promise<{ success: boolean; deletedCount?: number; error?: string; ownerNotFound?: boolean }> {
     const gid = productId.startsWith("gid://") ? productId : `gid://shopify/Product/${productId}`;
     const uniqueVariantIds = Array.from(new Set(variantIds.filter(Boolean)));
     if (uniqueVariantIds.length === 0) {
@@ -972,10 +1086,15 @@ export class ShopifyVariantManager {
         namespace: "safemedia",
         key: "clean_ad_image_url",
       }));
-      return await this.deleteMetafieldIdentifiers(identifiers, `${gid} variants`);
+      return await this.deleteVariantMetafieldIdentifiersResilient(identifiers, `${gid} variants`);
     } catch (err: unknown) {
+      if (err instanceof ShopifyAuthError) throw err;
       console.error(`[Shopify] Error in clearVariantCleanAdImageMetafields for ${gid}:`, err);
-      return { success: false, deletedCount: 0 };
+      return {
+        success: false,
+        deletedCount: 0,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 
@@ -987,7 +1106,7 @@ export class ShopifyVariantManager {
   async clearCleanAdImageMetafield(
     productId: string,
     variantIds?: string[]
-  ): Promise<{ success: boolean; deletedCount?: number }> {
+  ): Promise<{ success: boolean; deletedCount?: number; error?: string; ownerNotFound?: boolean }> {
     const gid = productId.startsWith("gid://") ? productId : `gid://shopify/Product/${productId}`;
     const uniqueVariantIds = Array.from(new Set((variantIds || []).filter(Boolean)));
 
@@ -1008,7 +1127,7 @@ export class ShopifyVariantManager {
     }
 
     try {
-      const identifiers = [
+      const productIdentifiers = [
         {
           ownerId: gid,
           namespace: "safemedia",
@@ -1019,17 +1138,43 @@ export class ShopifyVariantManager {
           namespace: "safemedia",
           key: "dual_feed_metadata",
         },
-        ...uniqueVariantIds.map((vid) => ({
-          ownerId: vid.startsWith("gid://") ? vid : `gid://shopify/ProductVariant/${vid}`,
-          namespace: "safemedia",
-          key: "clean_ad_image_url",
-        })),
       ];
 
-      return await this.deleteMetafieldIdentifiers(identifiers, gid);
+      const parentRes = await this.deleteMetafieldIdentifiers(productIdentifiers, gid);
+      if (!parentRes.success) {
+        return parentRes;
+      }
+
+      if (uniqueVariantIds.length === 0) {
+        return parentRes;
+      }
+
+      const variantIdentifiers = uniqueVariantIds.map((vid) => ({
+        ownerId: vid.startsWith("gid://") ? vid : `gid://shopify/ProductVariant/${vid}`,
+        namespace: "safemedia",
+        key: "clean_ad_image_url",
+      }));
+      const varRes = await this.deleteVariantMetafieldIdentifiersResilient(variantIdentifiers, `${gid} variants`);
+      if (!varRes.success) {
+        return {
+          success: false,
+          deletedCount: parentRes.deletedCount + varRes.deletedCount,
+          error: varRes.error,
+        };
+      }
+
+      return {
+        success: true,
+        deletedCount: parentRes.deletedCount + varRes.deletedCount,
+      };
     } catch (err: unknown) {
+      if (err instanceof ShopifyAuthError) throw err;
       console.error(`[Shopify] Error in clearCleanAdImageMetafield for ${gid}:`, err);
-      return { success: false, deletedCount: 0 };
+      return {
+        success: false,
+        deletedCount: 0,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
   }
 

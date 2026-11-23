@@ -1063,7 +1063,7 @@ class MockWorkerApp:
                 if store.last_rollback and not payload.get("force_reclean"):
                     diffs = store.last_rollback.get("productDataDiffs") or []
                     rb_diff = next((d for d in diffs if d.get("productId") == prod_gid or d.get("productId") == str(product_id)), None)
-                    if rb_diff and not rb_diff.get("clearedAfterRollback"):
+                    if rb_diff and not rb_diff.get("clearedAfterRollback") and not rb_diff.get("skipped"):
                         after_revert = rb_diff.get("afterRevert") or {}
                         is_same_img = (
                             rb_diff.get("storefrontImageUrl") == primary_img or

@@ -12,13 +12,70 @@ import {
   RollbackExecutionResult,
   SnapshotSummary,
 } from "./types";
-import { ShopifyVariantManager } from "./shopify";
+import { ShopifyVariantManager, ShopifyAuthError } from "./shopify";
 
 // In-memory fallback cache for development/mocking when R2 is unconfigured
 const MEMORY_SNAPSHOT_STORE: Map<string, StoreSnapshot> = new Map();
 const LAST_ROLLBACK_STORE: Map<string, RollbackExecutionResult> = new Map();
 const MEMORY_BASELINE_POINTER: Map<string, string> = new Map();
 const MEMORY_LATEST_POINTER: Map<string, string> = new Map();
+
+function normalizeProductGid(productId: string): string {
+  if (productId.startsWith("gid://shopify/Product/") || productId.startsWith("gid://")) {
+    return productId;
+  }
+  return `gid://shopify/Product/${productId}`;
+}
+
+function isProductNotFoundError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    msg.includes("does not exist") ||
+    msg.includes("not found") ||
+    msg.includes("could not find") ||
+    msg.includes("not associated with") ||
+    msg.includes("invalid media") ||
+    msg.includes("invalid variant")
+  );
+}
+
+function buildSkippedProductDiff(
+  p: ProductSnapshot,
+  snapshotId: string,
+  revertedAt: string
+): RollbackProductDataDiff {
+  const storefrontImageUrl = p.originalMediaList[0]?.url || "";
+  return {
+    productId: p.productId,
+    productTitle: p.productTitle,
+    snapshotId,
+    revertedAt,
+    storefrontImageUrl,
+    storefrontUnchanged: true,
+    skipped: true,
+    beforeRevert: {
+      storefrontImageUrl,
+      cleanAdImageMetafield: null,
+      gmcImageLink: storefrontImageUrl,
+      metaImageLink: storefrontImageUrl,
+      variantCount: p.variants.length,
+      cleanedVariantCount: 0,
+      variantCleanImageMap: {},
+      variantLinksPreserved: false,
+    },
+    afterRevert: {
+      storefrontImageUrl,
+      cleanAdImageMetafield: null,
+      gmcImageLink: storefrontImageUrl,
+      metaImageLink: storefrontImageUrl,
+      metafieldAction: "SKIPPED_DELETED",
+      variantCount: p.variants.length,
+      cleanedVariantCount: 0,
+      variantCleanImageMap: {},
+      variantLinksPreserved: false,
+    },
+  };
+}
 
 function buildProductVariantCleanMap(prod?: ProductSnapshot): Record<string, string> {
   const map: Record<string, string> = {};
@@ -538,16 +595,26 @@ export class SnapshotEngine {
       targetSnapshot = await this.getLatestSnapshot();
     }
 
+    if (targetSnapshot && targetSnapshot.shop !== this.shop) {
+      targetSnapshot = null;
+    }
+
     if (!targetSnapshot) {
       throw new Error("No snapshot found to rollback to.");
     }
 
     // 1. Capture live product state right BEFORE executing rollback (for Before vs. After comparison)
-    const liveProductsBefore = await variantManager.fetchProductsWithVariants().catch(() => []);
+    let liveFetchSucceeded = true;
+    const liveProductsBefore = await variantManager.fetchProductsWithVariants().catch((err: unknown) => {
+      if (err instanceof ShopifyAuthError) throw err;
+      liveFetchSucceeded = false;
+      return [] as ProductSnapshot[];
+    });
     const beforeProductMap = new Map<string, ProductSnapshot>();
     for (const lp of liveProductsBefore) {
-      beforeProductMap.set(lp.productId, lp);
+      beforeProductMap.set(normalizeProductGid(lp.productId), lp);
     }
+    const canDetectDeletedFromLiveList = liveFetchSucceeded && liveProductsBefore.length < 250;
 
     let restoredCount = 0;
     const products = Object.values(targetSnapshot.products);
@@ -564,7 +631,10 @@ export class SnapshotEngine {
       revertedAt,
       metafieldsRestored: false,
       productDataDiffs: products.map((p) => {
-        const liveProd = beforeProductMap.get(p.productId);
+        const liveProd = beforeProductMap.get(normalizeProductGid(p.productId));
+        if (!liveProd && canDetectDeletedFromLiveList) {
+          return buildSkippedProductDiff(p, targetSnapshot.snapshotId, revertedAt);
+        }
         const storefrontImageUrl =
           liveProd?.originalMediaList[0]?.url || p.originalMediaList[0]?.url || "";
         const beforeVariantMap = buildProductVariantCleanMap(liveProd);
@@ -625,112 +695,30 @@ export class SnapshotEngine {
       for (let i = 0; i < products.length; i += ROLLBACK_CONCURRENCY) {
         const chunk = products.slice(i, i + ROLLBACK_CONCURRENCY);
         const chunkDiffs = await Promise.all(
-          chunk.map(async (p): Promise<RollbackProductDataDiff> => {
-            const liveProd = beforeProductMap.get(p.productId);
-            const storefrontImageUrl =
-              liveProd?.originalMediaList[0]?.url || p.originalMediaList[0]?.url || "";
-            const beforeCleanMeta = liveProd?.cleanAdImageUrl || null;
-            const beforeVariantMap = buildProductVariantCleanMap(liveProd);
-            const snapshotVariantMap = buildProductVariantCleanMap(p);
-
-            // 2. Re-map each variant to its original media ID
-            const revertUpdates = p.variants
-              .filter((v) => Boolean(v.originalMediaId))
-              .map((v) => ({
-                variantId: v.variantId,
-                newMediaId: v.originalMediaId,
-              }));
-
-            if (revertUpdates.length > 0) {
-              await variantManager.rebindVariants(p.productId, revertUpdates);
-            }
-
-            // 3. Restore or purge ad-feed hidden metafields (parent + all variants) to exact snapshot state
-            let afterCleanMeta: string | null = null;
-            let afterVariantMap: Record<string, string> = {};
-            let metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN" = "PURGED_TO_VIRGIN";
-
-            if (p.cleanAdImageUrl || Object.keys(snapshotVariantMap).length > 0) {
-              const restorePrimaryUrl = p.cleanAdImageUrl || Object.values(snapshotVariantMap)[0] || "";
-              await variantManager.setCleanAdImageMetafield(
-                p.productId,
-                restorePrimaryUrl,
-                {
-                  sourceImageUrl: p.dualFeedMetadata?.sourceImageUrl || p.originalMediaList[0]?.url || "",
-                  shopifyImageUrl: p.dualFeedMetadata?.shopifyImageUrl || p.originalMediaList[0]?.url || "",
-                  cleanedAt: p.dualFeedMetadata?.cleanedAt || targetSnapshot.createdAt,
-                  maskCoveragePct: p.dualFeedMetadata?.maskCoveragePct,
-                  processingSec: p.dualFeedMetadata?.processingSec,
-                  engine: p.dualFeedMetadata?.engine || "Snapshot-Rollback",
-                  cleanedImageUrls: p.dualFeedMetadata?.cleanedImageUrls,
-                  variantCleanImageMap: snapshotVariantMap,
-                },
-                snapshotVariantMap
-              );
-
-              // Remove variant metafields that were created after the target snapshot
-              const staleVariantIds = Object.keys(beforeVariantMap).filter((vid) => !snapshotVariantMap[vid]);
-              if (staleVariantIds.length > 0) {
-                await variantManager.clearVariantCleanAdImageMetafields(p.productId, staleVariantIds);
-              }
-
-              afterCleanMeta = restorePrimaryUrl;
-              afterVariantMap = snapshotVariantMap;
-              metafieldAction = "RESTORED_TO_SNAPSHOT";
-            } else {
-              // Snapshot had no clean image; purge product + all variant metafields to restore virgin state
-              const allVariantIdsToPurge = Array.from(
-                new Set([
-                  ...(p.variants || []).map((v) => v.variantId),
-                  ...(liveProd?.variants || []).map((v) => v.variantId),
-                  ...Object.keys(beforeVariantMap),
-                ])
-              );
-              await variantManager.clearCleanAdImageMetafield(p.productId, allVariantIdsToPurge);
-              afterCleanMeta = null;
-              afterVariantMap = {};
-              metafieldAction = "PURGED_TO_VIRGIN";
-            }
-
-            return {
-              productId: p.productId,
-              productTitle: p.productTitle,
-              snapshotId: targetSnapshot.snapshotId,
-              revertedAt,
-              storefrontImageUrl,
-              storefrontUnchanged: true,
-              beforeRevert: {
-                storefrontImageUrl,
-                cleanAdImageMetafield: beforeCleanMeta,
-                gmcImageLink: beforeCleanMeta || storefrontImageUrl,
-                metaImageLink: beforeCleanMeta || storefrontImageUrl,
-                variantCount: p.variants.length,
-                cleanedVariantCount: Object.keys(beforeVariantMap).length,
-                variantCleanImageMap: beforeVariantMap,
-                variantLinksPreserved: true,
-              },
-              afterRevert: {
-                storefrontImageUrl,
-                cleanAdImageMetafield: afterCleanMeta,
-                gmcImageLink: afterCleanMeta || storefrontImageUrl,
-                metaImageLink: afterCleanMeta || storefrontImageUrl,
-                metafieldAction,
-                variantCount: p.variants.length,
-                cleanedVariantCount: Object.keys(afterVariantMap).length,
-                variantCleanImageMap: afterVariantMap,
-                variantLinksPreserved: true,
-              },
-            };
-          })
+          chunk.map((p) =>
+            this.restoreSingleProduct(
+              variantManager,
+              p,
+              targetSnapshot!,
+              beforeProductMap.get(normalizeProductGid(p.productId)),
+              canDetectDeletedFromLiveList,
+              revertedAt
+            )
+          )
         );
         productDataDiffs.push(...chunkDiffs);
-        restoredCount += chunkDiffs.length;
+        restoredCount += chunkDiffs.filter((d) => !d.skipped).length;
       }
     } catch (rollbackErr: unknown) {
+      const failedSkippedIds = productDataDiffs
+        .filter((d) => d.skipped)
+        .map((d) => d.productId);
       const failResult: RollbackExecutionResult = {
         success: false,
         restoredCount,
         restoredProducts: restoredCount,
+        skippedCount: failedSkippedIds.length,
+        ...(failedSkippedIds.length > 0 ? { skippedProductIds: failedSkippedIds } : {}),
         snapshotId: targetSnapshot.snapshotId,
         snapshotTimestamp: targetSnapshot.createdAt,
         revertedAt: new Date().toISOString(),
@@ -754,17 +742,30 @@ export class SnapshotEngine {
       throw rollbackErr;
     }
 
+    const skippedProductIds = productDataDiffs
+      .filter((d) => d.skipped)
+      .map((d) => d.productId);
+    const skippedCount = skippedProductIds.length;
+    const resultMessage =
+      skippedCount > 0
+        ? restoredCount === 0
+          ? `No active products found to restore (${skippedCount} snapshot product(s) were deleted in Shopify).`
+          : `Restored ${restoredCount} product(s). Skipped ${skippedCount} product(s) deleted in Shopify.`
+        : "Store media and ad-feed metafields restored successfully.";
+
     const result: RollbackExecutionResult = {
       success: true,
       restoredCount,
       restoredProducts: restoredCount,
+      skippedCount,
+      ...(skippedCount > 0 ? { skippedProductIds } : {}),
       snapshotId: targetSnapshot.snapshotId,
       snapshotTimestamp: targetSnapshot.createdAt,
       revertedAt,
-      metafieldsRestored: true,
+      metafieldsRestored: restoredCount > 0,
       productDataDiffs,
       beforeAfterComparisons: productDataDiffs,
-      message: "Store media and ad-feed metafields restored successfully.",
+      message: resultMessage,
     };
 
     LAST_ROLLBACK_STORE.set(this.shop, result);
@@ -781,5 +782,196 @@ export class SnapshotEngine {
     }
 
     return result;
+  }
+
+  /**
+   * Restores a single product from a snapshot, filtering deleted variants/media,
+   * skipping confirmed-deleted products, and retrying once with fresh live state if
+   * concurrent child variant/media deletion triggers an owner-not-found error.
+   */
+  private async restoreSingleProduct(
+    variantManager: ShopifyVariantManager,
+    p: ProductSnapshot,
+    targetSnapshot: StoreSnapshot,
+    initialLiveProd: ProductSnapshot | undefined,
+    canDetectDeletedFromLiveList: boolean,
+    revertedAt: string
+  ): Promise<RollbackProductDataDiff> {
+    let liveProd = initialLiveProd;
+    let mediaFetchLimit = 20;
+
+    if (!liveProd) {
+      if (canDetectDeletedFromLiveList) {
+        return buildSkippedProductDiff(p, targetSnapshot.snapshotId, revertedAt);
+      }
+      const fetched = await variantManager.fetchProductWithExistence(p.productId);
+      if (fetched.status === "deleted") {
+        return buildSkippedProductDiff(p, targetSnapshot.snapshotId, revertedAt);
+      }
+      if (fetched.status === "unknown") {
+        throw new Error(`Transient Shopify API error while verifying product existence for ${p.productId}`);
+      }
+      liveProd = fetched.product;
+      mediaFetchLimit = 30;
+    }
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const storefrontImageUrl =
+        liveProd?.originalMediaList[0]?.url || p.originalMediaList[0]?.url || "";
+      const beforeCleanMeta = liveProd?.cleanAdImageUrl || null;
+      const beforeVariantMap = buildProductVariantCleanMap(liveProd);
+      const snapshotVariantMap = buildProductVariantCleanMap(p);
+      const liveVariantIdSet =
+        liveProd && liveProd.variants.length < 100
+          ? new Set(liveProd.variants.map((v) => v.variantId))
+          : null;
+      const liveMediaIdSet =
+        liveProd && liveProd.originalMediaList.length < mediaFetchLimit
+          ? new Set(liveProd.originalMediaList.map((m) => m.id))
+          : null;
+      const effectiveVariantCount = liveProd ? liveProd.variants.length : p.variants.length;
+
+      try {
+        // 2. Re-map each surviving variant to its surviving original media ID
+        const revertUpdates = p.variants
+          .filter(
+            (v) =>
+              Boolean(v.originalMediaId) &&
+              (!liveVariantIdSet || liveVariantIdSet.has(v.variantId)) &&
+              (!liveMediaIdSet || liveMediaIdSet.has(v.originalMediaId))
+          )
+          .map((v) => ({
+            variantId: v.variantId,
+            newMediaId: v.originalMediaId,
+          }));
+
+        if (revertUpdates.length > 0) {
+          await variantManager.rebindVariants(p.productId, revertUpdates);
+        }
+
+        // Filter snapshot variant metafields to currently existing variants so deleted variants don't abort parent restore
+        const activeSnapshotVariantMap: Record<string, string> = {};
+        for (const [vid, url] of Object.entries(snapshotVariantMap)) {
+          if (!liveVariantIdSet || liveVariantIdSet.has(vid)) {
+            activeSnapshotVariantMap[vid] = url;
+          }
+        }
+
+        // 3. Restore or purge ad-feed hidden metafields (parent + surviving variants) to exact snapshot state
+        let afterCleanMeta: string | null = null;
+        let afterVariantMap: Record<string, string> = {};
+        let metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN" = "PURGED_TO_VIRGIN";
+
+        if (p.cleanAdImageUrl || Object.keys(activeSnapshotVariantMap).length > 0) {
+          const restorePrimaryUrl =
+            p.cleanAdImageUrl || Object.values(activeSnapshotVariantMap)[0] || "";
+          await variantManager.setCleanAdImageMetafield(
+            p.productId,
+            restorePrimaryUrl,
+            {
+              sourceImageUrl: p.dualFeedMetadata?.sourceImageUrl || p.originalMediaList[0]?.url || "",
+              shopifyImageUrl: p.dualFeedMetadata?.shopifyImageUrl || p.originalMediaList[0]?.url || "",
+              cleanedAt: p.dualFeedMetadata?.cleanedAt || targetSnapshot.createdAt,
+              maskCoveragePct: p.dualFeedMetadata?.maskCoveragePct,
+              processingSec: p.dualFeedMetadata?.processingSec,
+              engine: p.dualFeedMetadata?.engine || "Snapshot-Rollback",
+              cleanedImageUrls: p.dualFeedMetadata?.cleanedImageUrls,
+              variantCleanImageMap: activeSnapshotVariantMap,
+            },
+            activeSnapshotVariantMap
+          );
+
+          // Remove variant metafields that were created after the target snapshot
+          const staleVariantIds = Object.keys(beforeVariantMap).filter(
+            (vid) => !activeSnapshotVariantMap[vid] && (!liveVariantIdSet || liveVariantIdSet.has(vid))
+          );
+          if (staleVariantIds.length > 0) {
+            const clearVarRes = await variantManager.clearVariantCleanAdImageMetafields(
+              p.productId,
+              staleVariantIds
+            );
+            if (!clearVarRes.success) {
+              throw new Error(
+                clearVarRes.error || `Failed to clear stale variant metafields for ${p.productId}`
+              );
+            }
+          }
+
+          afterCleanMeta = restorePrimaryUrl;
+          afterVariantMap = activeSnapshotVariantMap;
+          metafieldAction = "RESTORED_TO_SNAPSHOT";
+        } else {
+          // Snapshot had no clean image; purge product + surviving variant metafields to restore virgin state
+          const allVariantIdsToPurge = Array.from(
+            new Set([
+              ...(p.variants || []).map((v) => v.variantId),
+              ...(liveProd?.variants || []).map((v) => v.variantId),
+              ...Object.keys(beforeVariantMap),
+            ])
+          ).filter((vid) => !liveVariantIdSet || liveVariantIdSet.has(vid));
+          const clearRes = await variantManager.clearCleanAdImageMetafield(
+            p.productId,
+            allVariantIdsToPurge
+          );
+          if (!clearRes.success) {
+            if (clearRes.ownerNotFound) {
+              throw new Error(`Metafield owner does not exist for ${p.productId}: ${clearRes.error || ""}`);
+            }
+            throw new Error(clearRes.error || `Failed to clear metafields for ${p.productId}`);
+          }
+          afterCleanMeta = null;
+          afterVariantMap = {};
+          metafieldAction = "PURGED_TO_VIRGIN";
+        }
+
+        return {
+          productId: p.productId,
+          productTitle: p.productTitle,
+          snapshotId: targetSnapshot.snapshotId,
+          revertedAt,
+          storefrontImageUrl,
+          storefrontUnchanged: true,
+          beforeRevert: {
+            storefrontImageUrl,
+            cleanAdImageMetafield: beforeCleanMeta,
+            gmcImageLink: beforeCleanMeta || storefrontImageUrl,
+            metaImageLink: beforeCleanMeta || storefrontImageUrl,
+            variantCount: effectiveVariantCount,
+            cleanedVariantCount: Object.keys(beforeVariantMap).length,
+            variantCleanImageMap: beforeVariantMap,
+            variantLinksPreserved: true,
+          },
+          afterRevert: {
+            storefrontImageUrl,
+            cleanAdImageMetafield: afterCleanMeta,
+            gmcImageLink: afterCleanMeta || storefrontImageUrl,
+            metaImageLink: afterCleanMeta || storefrontImageUrl,
+            metafieldAction,
+            variantCount: effectiveVariantCount,
+            cleanedVariantCount: Object.keys(afterVariantMap).length,
+            variantCleanImageMap: afterVariantMap,
+            variantLinksPreserved: true,
+          },
+        };
+      } catch (prodErr: unknown) {
+        if (isProductNotFoundError(prodErr)) {
+          const fetched = await variantManager.fetchProductWithExistence(p.productId);
+          if (fetched.status === "deleted") {
+            return buildSkippedProductDiff(p, targetSnapshot.snapshotId, revertedAt);
+          }
+          if (fetched.status === "unknown") {
+            throw new Error(`Transient Shopify API error while verifying product existence for ${p.productId}`);
+          }
+          if (fetched.status === "exists" && attempt === 0) {
+            liveProd = fetched.product;
+            mediaFetchLimit = 30;
+            continue;
+          }
+        }
+        throw prodErr;
+      }
+    }
+
+    return buildSkippedProductDiff(p, targetSnapshot.snapshotId, revertedAt);
   }
 }

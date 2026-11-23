@@ -1334,57 +1334,91 @@ export function renderDashboardHtml(shop: string, apiKey: string = "", feedToken
           ? Number(item.afterRevert.cleanedVariantCount)
           : (item.afterRevert && item.afterRevert.variantCleanImageMap ? Object.keys(item.afterRevert.variantCleanImageMap).length : (aMeta ? vCount : 0));
         const actionCode = (item.afterRevert && item.afterRevert.metafieldAction) || (aMeta ? 'RESTORED_TO_SNAPSHOT' : 'PURGED_TO_VIRGIN');
+        const isSkipped = Boolean(item.skipped || actionCode === 'SKIPPED_DELETED');
         const gmcBefore = (item.beforeRevert && item.beforeRevert.gmcImageLink) || '';
         const gmcAfter = (item.afterRevert && item.afterRevert.gmcImageLink) || '';
 
         const bMetaDisplay = sanitizeText(bMeta ? bMeta.split('/').pop() : 'None');
-        const aMetaDisplay = sanitizeText(aMeta ? aMeta.split('/').pop() : (currentLang === 'ja' ? '初期状態（Metafield削除）' : 'Purged to Virgin'));
+        const aMetaDisplay = sanitizeText(
+          isSkipped
+            ? (currentLang === 'ja' ? 'スキップ（削除済み）' : 'Skipped (Deleted)')
+            : (aMeta ? aMeta.split('/').pop() : (currentLang === 'ja' ? '初期状態（Metafield削除）' : 'Purged to Virgin'))
+        );
         const bGmcDisplay = sanitizeText(gmcBefore ? gmcBefore.split('/').pop() : 'Default');
-        const aGmcDisplay = sanitizeText(gmcAfter ? gmcAfter.split('/').pop() : 'Default');
+        const aGmcDisplay = sanitizeText(
+          isSkipped
+            ? (currentLang === 'ja' ? '配信除外（削除済）' : 'N/A (Deleted)')
+            : (gmcAfter ? gmcAfter.split('/').pop() : 'Default')
+        );
         const safeProdTitle = sanitizeText(item.productTitle);
         const safeProdId = sanitizeText(item.productId);
         const safeStorefrontUrl = sanitizeUrl(storefrontUrl);
         const safeBMetaAttr = sanitizeText(bMeta || 'null');
-        const safeAMetaAttr = sanitizeText(aMeta || 'Reverted');
+        const safeAMetaAttr = sanitizeText(isSkipped ? 'Skipped (Deleted in Shopify)' : (aMeta || 'Reverted'));
         const safeActionCode = sanitizeText(actionCode);
         const safeSnapRef = sanitizeText(snapId.replace('snap_', '').replace('.json', ''));
         const safeSnapIdFull = sanitizeText(snapId);
         const safeRevertTimeShort = sanitizeText(new Date(revertTime).toLocaleTimeString());
 
-        const variantMetaSummary = vCount > 0
-          ? '<div class="text-[10px] text-slate-600 pt-0.5">' +
-              (currentLang === 'ja' ? 'バリアント: ' : 'Variants: ') + bVarCleaned + '/' + vCount + ' ➔ ' + aVarCleaned + '/' + vCount +
-              ' <span class="px-1 py-0.5 rounded bg-slate-100 text-slate-700 text-[9px]">' + safeActionCode + '</span>' +
+        const variantMetaSummary = isSkipped
+          ? '<div class="text-[10px] text-slate-500 pt-0.5">' +
+              '<span class="px-1 py-0.5 rounded bg-slate-100 text-slate-700 text-[9px]">' + safeActionCode + '</span>' +
             '</div>'
-          : '';
+          : (vCount > 0
+              ? '<div class="text-[10px] text-slate-600 pt-0.5">' +
+                  (currentLang === 'ja' ? 'バリアント: ' : 'Variants: ') + bVarCleaned + '/' + vCount + ' ➔ ' + aVarCleaned + '/' + vCount +
+                  ' <span class="px-1 py-0.5 rounded bg-slate-100 text-slate-700 text-[9px]">' + safeActionCode + '</span>' +
+                '</div>'
+              : '');
 
-        const variantFeedSummary = vCount > 0
+        const variantFeedSummary = !isSkipped && vCount > 0
           ? '<div class="text-[10px] text-emerald-700">' + aVarCleaned + '/' + vCount + (currentLang === 'ja' ? ' バリアント配信' : ' variant feed items') + '</div>'
           : '';
 
-        rowsHtml += '<tr class="hover:bg-slate-50 border-b border-gray-100 text-xs">' +
-          '<td class="px-3 py-3 font-medium text-gray-900">' +
-            '<div class="font-semibold">' + safeProdTitle + '</div>' +
-            '<div class="text-[10px] text-gray-400 font-mono truncate max-w-[140px]">' + safeProdId + '</div>' +
-          '</td>' +
-          '<td class="px-3 py-3">' +
-            '<div class="flex items-center gap-1.5">' +
+        const storefrontCellHtml = isSkipped
+          ? '<div class="flex items-center gap-1.5">' +
+              '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600">DELETED IN SHOPIFY</span>' +
+            '</div>' +
+            '<div class="mt-1 text-[10px] text-slate-400">' +
+              (currentLang === 'ja' ? 'Shopifyから削除済み（対象外）' : 'Product deleted in Shopify') +
+            '</div>'
+          : '<div class="flex items-center gap-1.5">' +
               '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800">100% UNCHANGED</span>' +
             '</div>' +
             '<div class="mt-1">' +
               '<a href="' + safeStorefrontUrl + '" target="_blank" class="text-[11px] text-gray-600 hover:text-gray-900 underline font-mono truncate max-w-[150px] inline-block">' +
                 (currentLang === 'ja' ? '自社ストア画像 ↗' : 'Storefront Media ↗') +
               '</a>' +
-            '</div>' +
+            '</div>';
+
+        const variantStatusCellHtml = isSkipped
+          ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 text-slate-600">' +
+              '<span>⏭️</span> <span>' + (currentLang === 'ja' ? 'スキップ' : 'Skipped') + '</span>' +
+            '</span>' +
+            '<div class="text-[10px] text-slate-500 mt-1">' +
+              (currentLang === 'ja' ? '削除済み商品のため未処理' : 'Deleted in Shopify') +
+            '</div>'
+          : '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">' +
+              '<span>🔗</span> <span>' + vCount + '/' + vCount + ' ' + (currentLang === 'ja' ? '連動保持' : 'Preserved') + '</span>' +
+            '</span>' +
+            '<div class="text-[10px] text-emerald-700 mt-1 font-medium">' +
+              (currentLang === 'ja' ? '画像・Metafield同期済' : 'Media & Metafields Synced') +
+            '</div>';
+
+        rowsHtml += '<tr class="hover:bg-slate-50 border-b border-gray-100 text-xs">' +
+          '<td class="px-3 py-3 font-medium text-gray-900">' +
+            '<div class="font-semibold">' + safeProdTitle + '</div>' +
+            '<div class="text-[10px] text-gray-400 font-mono truncate max-w-[140px]">' + safeProdId + '</div>' +
           '</td>' +
+          '<td class="px-3 py-3">' + storefrontCellHtml + '</td>' +
           '<td class="px-3 py-3 font-mono text-[11px]">' +
             '<div class="space-y-1">' +
               '<div class="flex items-center gap-1.5 text-slate-500">' +
                 '<span class="text-[10px] uppercase font-bold text-slate-400">Before:</span> ' +
                 '<span class="truncate max-w-[130px]" title="' + safeBMetaAttr + '">' + bMetaDisplay + '</span>' +
               '</div>' +
-              '<div class="flex items-center gap-1.5 text-emerald-700 font-semibold">' +
-                '<span class="text-[10px] uppercase font-bold text-emerald-600">After:</span> ' +
+              '<div class="flex items-center gap-1.5 ' + (isSkipped ? 'text-slate-500' : 'text-emerald-700 font-semibold') + '">' +
+                '<span class="text-[10px] uppercase font-bold ' + (isSkipped ? 'text-slate-400' : 'text-emerald-600') + '">After:</span> ' +
                 '<span class="truncate max-w-[130px]" title="' + safeAMetaAttr + '">' + aMetaDisplay + '</span>' +
               '</div>' +
               variantMetaSummary +
@@ -1393,22 +1427,15 @@ export function renderDashboardHtml(shop: string, apiKey: string = "", feedToken
           '<td class="px-3 py-3 font-mono text-[11px]">' +
             '<div class="space-y-1">' +
               '<div class="flex items-center gap-1 text-[10px] text-slate-600">' +
-                '<span class="font-bold">GMC:</span> <span class="truncate max-w-[140px]" title="' + sanitizeText(gmcBefore + ' -> ' + gmcAfter) + '">' + bGmcDisplay + ' ➔ ' + aGmcDisplay + '</span>' +
+                '<span class="font-bold">GMC:</span> <span class="truncate max-w-[140px]" title="' + sanitizeText(isSkipped ? 'N/A (Deleted in Shopify)' : (gmcBefore + ' -> ' + gmcAfter)) + '">' + (isSkipped ? aGmcDisplay : (bGmcDisplay + ' ➔ ' + aGmcDisplay)) + '</span>' +
               '</div>' +
               '<div class="flex items-center gap-1 text-[10px] text-slate-600">' +
-                '<span class="font-bold">Meta:</span> <span class="truncate max-w-[140px]">' + bGmcDisplay + ' ➔ ' + aGmcDisplay + '</span>' +
+                '<span class="font-bold">Meta:</span> <span class="truncate max-w-[140px]">' + (isSkipped ? aGmcDisplay : (bGmcDisplay + ' ➔ ' + aGmcDisplay)) + '</span>' +
               '</div>' +
               variantFeedSummary +
             '</div>' +
           '</td>' +
-          '<td class="px-3 py-3">' +
-            '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800">' +
-              '<span>🔗</span> <span>' + vCount + '/' + vCount + ' ' + (currentLang === 'ja' ? '連動保持' : 'Preserved') + '</span>' +
-            '</span>' +
-            '<div class="text-[10px] text-emerald-700 mt-1 font-medium">' +
-              (currentLang === 'ja' ? '画像・Metafield同期済' : 'Media & Metafields Synced') +
-            '</div>' +
-          '</td>' +
+          '<td class="px-3 py-3">' + variantStatusCellHtml + '</td>' +
           '<td class="px-3 py-3 font-mono text-[10px] text-gray-500">' +
             '<div class="font-semibold text-gray-700 truncate max-w-[100px]">' + safeSnapRef + '</div>' +
             '<div class="text-[10px] text-gray-400">' + safeRevertTimeShort + '</div>' +
@@ -1421,6 +1448,13 @@ export function renderDashboardHtml(shop: string, apiKey: string = "", feedToken
         : 'Rollback Before vs. After Product Data Comparison';
       const snapLabel = currentLang === 'ja' ? '適用スナップショット' : 'Applied Snapshot';
       const revertLabel = currentLang === 'ja' ? '復元完了時刻' : 'Reverted At';
+      const allDiffsSkipped = diffs.every(function(d) {
+        return Boolean(d.skipped || (d.afterRevert && d.afterRevert.metafieldAction === 'SKIPPED_DELETED'));
+      });
+      const summaryBadgesHtml = allDiffsSkipped
+        ? '<span class="px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700">⏭️ ' + (currentLang === 'ja' ? '削除済み商品をスキップ' : 'Deleted Products Skipped') + '</span>'
+        : '<span class="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200">🛡️ Storefront Unchanged</span>' +
+          '<span class="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200">🔒 100% Variant Binding</span>';
 
       panel.innerHTML = '<div class="space-y-3">' +
         '<details open class="group bg-white rounded-lg border border-gray-200 overflow-hidden">' +
@@ -1432,8 +1466,7 @@ export function renderDashboardHtml(shop: string, apiKey: string = "", feedToken
               '<span class="px-2 py-0.5 rounded-full text-[10px] font-mono bg-blue-100 text-blue-800 font-bold">' + diffs.length + ' ' + (currentLang === 'ja' ? '件の比較データ' : 'items') + '</span>' +
             '</div>' +
             '<div class="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-emerald-800">' +
-              '<span class="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200">🛡️ Storefront Unchanged</span>' +
-              '<span class="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200">🔒 100% Variant Binding</span>' +
+              summaryBadgesHtml +
             '</div>' +
           '</summary>' +
           '<div class="p-4 border-t border-gray-200 space-y-3">' +
@@ -2412,24 +2445,56 @@ export function renderDashboardHtml(shop: string, apiKey: string = "", feedToken
     function renderCanaryResult(data) {
       const container = document.getElementById('canary-container');
       const checks = data.variantChecks || [];
-      const variantButtons = checks.map((v, idx) =>
-        '<button onclick="selectVariant(' + idx + ')" id="vbtn-' + idx + '" class="variant-pill px-3 py-1.5 text-xs font-semibold rounded-lg border ' + (idx === 0 ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50') + '">' +
+      let initialIdx = checks.findIndex((v) => Boolean(v.newlyCleaned));
+      if (initialIdx < 0) {
+        initialIdx = checks.findIndex((v) => v.hasOriginalMedia !== false);
+      }
+      if (initialIdx < 0) {
+        initialIdx = 0;
+      }
+
+      const variantButtons = checks.map((v, idx) => {
+        const isActive = idx === initialIdx;
+        const newBadge = v.newlyCleaned
+          ? ' <span class="ml-1 px-1.5 py-0.5 rounded text-[9px] font-bold ' + (isActive ? 'bg-white/25 text-white' : 'bg-amber-200 text-amber-900') + '">' + (currentLang === 'ja' ? '更新' : 'NEW') + '</span>'
+          : '';
+        const parentNote = v.hasOriginalMedia === false
+          ? ' <span class="ml-1 text-[10px] opacity-75">' + (currentLang === 'ja' ? '(親画像)' : '(Parent)') + '</span>'
+          : '';
+        return '<button onclick="selectVariant(' + idx + ')" id="vbtn-' + idx + '" class="variant-pill px-3 py-1.5 text-xs font-semibold rounded-lg border ' + (isActive ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50') + '">' +
           sanitizeText(v.title || v.variantTitle || ('Variant ' + (idx + 1))) +
-        '</button>'
-      ).join('');
+          newBadge +
+          parentNote +
+        '</button>';
+      }).join('');
 
       const lblProduct = currentLang === 'ja' ? 'テスト対象商品:' : 'Sample Product:';
-      const lblBadge = currentLang === 'ja' ? '✅ カラー・サイズ画像連動 100%正常' : '✅ 100% Variant Links Preserved';
+      const allVariantsHaveMedia = checks.length === 0 || checks.every((v) => v.hasOriginalMedia !== false);
+      const lblBadge = allVariantsHaveMedia
+        ? (currentLang === 'ja' ? '✅ カラー・サイズ画像連動 100%正常' : '✅ 100% Variant Links Preserved')
+        : (currentLang === 'ja' ? '⚠️ 一部バリアント画像未設定（親画像を代用中）' : '⚠️ Some Variants Missing Image (Using Parent)');
+      const badgeClass = allVariantsHaveMedia
+        ? 'text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold'
+        : 'text-xs px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 font-bold';
       const lblBefore = currentLang === 'ja' ? '自社ストア表示（セール帯あり）' : 'Storefront Image (With Promo Badges)';
       const lblAfter = currentLang === 'ja' ? 'Google広告配信用（AI消去済クリーン画像）' : 'Google Ad-Feed Image (Policy-Safe Clean Version)';
-      const lblSuccessBanner = currentLang === 'ja'
-        ? 'プレビュー検証完了（※プランの画像処理枠は消費されていません）'
-        : 'Preview Verified (※ Plan image quota has not been consumed)';
+      const isSkipped = Boolean(data.skipped);
+      const bannerClass = isSkipped
+        ? 'p-3 bg-slate-100 border border-slate-300 rounded-lg text-xs md:text-sm text-slate-800 flex items-center gap-2'
+        : 'p-3 bg-emerald-50 border border-emerald-300 rounded-lg text-xs md:text-sm text-emerald-900 flex items-center gap-2';
+      const bannerIcon = isSkipped ? 'ℹ️' : '🎉';
+      const lblSuccessBanner = isSkipped
+        ? (currentLang === 'ja'
+            ? '既存のクリーン結果を表示中（対象画像はすべて処理済みのため AI 再処理なし・枠消費なし）'
+            : 'Showing existing clean results (all images already processed — no AI re-run or quota used)')
+        : (currentLang === 'ja'
+            ? 'プレビュー検証完了（※プランの画像処理枠は消費されていません）'
+            : 'Preview Verified (※ Plan image quota has not been consumed)');
       const lblSwitch = currentLang === 'ja'
         ? '👇 カラー・サイズボタンをクリックして、それぞれの画像が正しく連動するか確認できます：'
         : '👇 Click any variant option below to verify its linked photo stays intact:';
 
-      const firstCheck = checks.length > 0 ? checks[0] : null;
+      const firstCheck = checks.length > 0 ? (checks[initialIdx] || checks[0]) : null;
       const initialOrigRaw = (firstCheck && (firstCheck.originalImageUrl || firstCheck.activeImageUrl || firstCheck.url)) || data.originalImageUrl;
       const initialCleanRaw = (firstCheck && firstCheck.cleanAdImageUrl) || data.cleanAdImageUrl || data.afterImageUrl || data.optimizedImageUrl || initialOrigRaw;
       const cleanImg = sanitizeUrl(initialCleanRaw);
@@ -2448,13 +2513,13 @@ export function renderDashboardHtml(shop: string, apiKey: string = "", feedToken
 
       container.innerHTML =
         '<div class="bg-gray-50 p-4 rounded-xl border border-gray-200 space-y-4">' +
-          '<div id="canary-success-banner" class="p-3 bg-emerald-50 border border-emerald-300 rounded-lg text-xs md:text-sm text-emerald-900 flex items-center gap-2">' +
-            '<span class="text-base">🎉</span>' +
+          '<div id="canary-success-banner" class="' + bannerClass + '">' +
+            '<span class="text-base">' + bannerIcon + '</span>' +
             '<span class="font-bold">' + lblSuccessBanner + '</span>' +
           '</div>' +
           '<div class="flex flex-wrap items-center justify-between gap-2">' +
             '<h3 class="font-bold text-gray-900 text-sm">' + lblProduct + ' ' + safeProdTitle + '</h3>' +
-            '<span class="text-xs px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold">' + lblBadge + '</span>' +
+            '<span class="' + badgeClass + '">' + lblBadge + '</span>' +
           '</div>' +
 
           '<div class="grid grid-cols-1 md:grid-cols-2 gap-4">' +
@@ -2733,38 +2798,68 @@ export function renderDashboardHtml(shop: string, apiKey: string = "", feedToken
           body: JSON.stringify({ shop, snapshotId: selectedSnapshotId })
         });
 
+        const data = await res.json().catch(function() { return null; });
+        if (checkAuthAndHandleRedirect(res.status, data)) {
+          closeRollbackModal();
+          return;
+        }
+
         if (res.status === 402) {
           closeRollbackModal();
           openBatchTrialModal('rollback');
           return;
         }
 
-        const data = await res.json();
         closeRollbackModal();
-        if (data.success) {
+        if (data && data.success) {
+          const skippedCount = Number(data.skippedCount || 0);
+          const restoredCount = Number(data.restoredCount || 0);
+          const allSkipped = skippedCount > 0 && restoredCount === 0;
+          const snapSuffix = data.snapshotId ? ' (Snapshot: ' + sanitizeText(data.snapshotId) + ')' : '';
+          const rawSnapSuffix = data.snapshotId ? ' (Snapshot: ' + data.snapshotId + ')' : '';
+          const statusMsgText = currentLang === 'ja'
+            ? (allSkipped
+                ? 'ℹ️ 復元対象なし: スナップショット内の ' + skippedCount + ' 件はShopify上で削除済みのためスキップされました。' + snapSuffix
+                : skippedCount > 0
+                  ? '✅ ストア復元完了: ' + restoredCount + ' 件を復元しました（Shopify上で削除済みの ' + skippedCount + ' 件はスキップ）。' + snapSuffix
+                  : '✅ ストア復元完了: ' + sanitizeText(data.message || 'すべての画像とMetafieldを復元しました。') + snapSuffix)
+            : (allSkipped ? 'ℹ️ ' : '✅ Store Restored Successfully: ') + sanitizeText(data.message || 'All media and metafields restored.') + snapSuffix;
+          const notifMsgText = currentLang === 'ja'
+            ? (allSkipped
+                ? 'スナップショット内の ' + skippedCount + ' 件はShopify上で削除済みのためスキップされました。' + rawSnapSuffix
+                : skippedCount > 0
+                  ? restoredCount + ' 件を復元しました（Shopify上で削除済みの ' + skippedCount + ' 件はスキップ）。' + rawSnapSuffix
+                  : (data.message || 'すべての画像とMetafieldを復元しました。') + rawSnapSuffix)
+            : (data.message || 'All media and metafields restored.') + rawSnapSuffix;
+
           const step3Msg = document.getElementById('step3-action-msg');
           if (step3Msg) {
-            step3Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-emerald-50 border-emerald-300 text-emerald-900 flex items-center justify-between gap-2';
-            const okTxt = (currentLang === 'ja' ? '✅ ストア復元完了: ' : '✅ Store Restored Successfully: ') + sanitizeText(data.message || 'All media and metafields restored.') + (data.snapshotId ? ' (Snapshot: ' + sanitizeText(data.snapshotId) + ')' : '');
-            step3Msg.innerHTML = '<span>' + okTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
+            step3Msg.className = allSkipped
+              ? 'mb-3 text-xs rounded-lg p-3 border bg-amber-50 border-amber-300 text-amber-900 flex items-center justify-between gap-2'
+              : 'mb-3 text-xs rounded-lg p-3 border bg-emerald-50 border-emerald-300 text-emerald-900 flex items-center justify-between gap-2';
+            step3Msg.innerHTML = '<span>' + statusMsgText + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             step3Msg.classList.remove('hidden');
           }
-          showNotification('success',
-            currentLang === 'ja' ? 'ストア復元完了' : 'Store Restored Successfully',
-            (data.message || 'All media and metafields restored.') + (data.snapshotId ? ' (Snapshot: ' + data.snapshotId + ')' : '')
+          showNotification(
+            allSkipped ? 'info' : 'success',
+            currentLang === 'ja'
+              ? (allSkipped ? '復元対象なし（削除済み）' : 'ストア復元完了')
+              : (allSkipped ? 'No Active Products to Restore' : 'Store Restored Successfully'),
+            notifMsgText
           );
           renderRollbackComparison(data);
         } else {
+          const errMsg = (data && data.error) || 'Failed to rollback';
           const step3Msg = document.getElementById('step3-action-msg');
           if (step3Msg) {
             step3Msg.className = 'mb-3 text-xs rounded-lg p-3 border bg-red-50 border-red-300 text-red-900 flex items-center justify-between gap-2';
-            const errTxt = (currentLang === 'ja' ? '❌ 復元エラー: ' : '❌ Rollback Error: ') + sanitizeUiErrorMessage(data.error || 'Failed to rollback');
+            const errTxt = (currentLang === 'ja' ? '❌ 復元エラー: ' : '❌ Rollback Error: ') + sanitizeUiErrorMessage(errMsg);
             step3Msg.innerHTML = '<span>' + errTxt + '</span><button onclick="dismissMsg(this)" class="text-gray-400 hover:text-gray-700 text-sm font-bold px-1 select-none">✕</button>';
             step3Msg.classList.remove('hidden');
           }
           showNotification('error',
             currentLang === 'ja' ? '復元エラー' : 'Rollback Error',
-            data.error || 'Failed to rollback'
+            errMsg
           );
         }
         await refreshStatus();

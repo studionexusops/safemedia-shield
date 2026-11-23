@@ -4268,7 +4268,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
               const rbDiff = (lastRollback.productDataDiffs || []).find(
                 (d) => d.productId === productId || d.productId === String(productNumericId)
               );
-              if (rbDiff && !rbDiff.clearedAfterRollback) {
+              if (rbDiff && !rbDiff.clearedAfterRollback && !rbDiff.skipped) {
                 const isSameImageAsRollback =
                   rbDiff.storefrontImageUrl === effectiveImageUrl ||
                   rbDiff.afterRevert?.storefrontImageUrl === effectiveImageUrl ||
@@ -5363,7 +5363,8 @@ function renderOAuthEscapeHtml(authUrl: string): string {
           // Execute AI promo-badge removal pipeline with URL deduplication & bounded parallelism
           const existingCleanedMap = getExistingCleanedUrlMap(canaryProduct);
           const uncleanedImages = targetImages.filter((imgUrl) => !lookupCleanedImageUrl(existingCleanedMap, imgUrl));
-          if (uncleanedImages.length === 0 && quotaReserved) {
+          const isSkipped = uncleanedImages.length === 0;
+          if (isSkipped && quotaReserved) {
             billingState.canaryUsedCount = Math.max(0, billingState.canaryUsedCount - 1);
             await saveShopBillingState(env, billingState);
             quotaReserved = false;
@@ -5455,6 +5456,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
               variantCleanImageMap[v.variantId] ||
               lookupCleanedImageUrl(mergedCleanedMap, variantImg) ||
               (variantImg === targetImage ? actualAfterUrl : variantImg);
+            const isNewlyCleaned = Boolean(lookupCleanedImageUrl(newlyCleanedMap, variantImg));
             return {
               variantId: v.variantId,
               title: v.variantTitle,
@@ -5462,6 +5464,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
               preserved: hasOriginalMedia,
               originalImageUrl: variantImg,
               cleanAdImageUrl: variantCleanImg,
+              newlyCleaned: isNewlyCleaned,
               // Backwards-compatible aliases
               variantTitle: v.variantTitle,
               activeImageUrl: variantImg,
@@ -5482,6 +5485,9 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             variantChecks,
             canaryUsedCount: billingState.canaryUsedCount,
             canaryLimit: billingState.canaryLimit,
+            skipped: isSkipped,
+            skipReason: isSkipped ? "already_cleaned" : undefined,
+            newlyCleanedCount: imageResults.length,
 
             // Explicit Before/After aliases
             beforeImageUrl: actualBeforeUrl,
@@ -5740,6 +5746,26 @@ function renderOAuthEscapeHtml(authUrl: string): string {
         await syncAdFeedToR2(env, requestedShop, url.origin, undefined, activeToken).catch(() => {});
         return Response.json(result, { headers: corsHeaders });
       } catch (err: unknown) {
+        if (
+          err instanceof ShopifyAuthError ||
+          (err instanceof Error &&
+            (err.message.includes("401") ||
+              err.message.includes("Invalid API key") ||
+              err.message.includes("access token") ||
+              err.message.includes("unrecognized login") ||
+              err.message.includes("app has been uninstalled")))
+        ) {
+          console.warn(`[Self-Healing] Detected invalid Shopify auth during rollback for ${requestedShop}:`, err);
+          await clearInvalidShopAuth(env, requestedShop);
+          return Response.json(
+            {
+              error: "Shopify store authentication expired. Automatically reconnecting to authorization...",
+              code: "REAUTH_REQUIRED",
+              reauthUrl: `/api/auth?shop=${encodeURIComponent(requestedShop)}`,
+            },
+            { status: 401, headers: corsHeaders }
+          );
+        }
         const sanitized = sanitizeUserError(err);
         return Response.json(
           { success: false, ...sanitized.body },

@@ -399,8 +399,8 @@ interface SanitizedErrorResponse {
 - **処理ロジック（Shopify App Review 4.5.3 準拠）**:
   1. ロールバック実行直前に、現在のライブ商品状態（**Before Revert**: 現在適用されている `safemedia.clean_ad_image_url` メタフィールド値、ストアフロント表示画像URL、バリアント紐付け状態）をスナップショット比較用に取得・記録。
   2. R2から指定スナップショットJSON（`snapshots/{shop}/snap_{id}.json`）を取得。
-  3. `productVariantsBulkUpdate` ミューテーションにより、全バリアントの画像紐付けをスナップショット時の `MediaImage` IDへ復元。
-  4. 隠しメタフィールドの復元：スナップショット時にクリーン画像が存在していた商品および各バリアントはスナップショット時のメタフィールドを再設定（`RESTORED_TO_SNAPSHOT`）。スナップショット時にクリーン画像が存在しなかった商品および各バリアントは `metafieldsDelete` ミューテーション（Shopify 2024-10 公式仕様）で親商品および全バリアントのメタフィールド（`clean_ad_image_url`, `dual_feed_metadata`）を完全削除し、クリーンな初期状態へ復元（`PURGED_TO_VIRGIN`）。
+  3. `productVariantsBulkUpdate` ミューテーションにより、生存している各バリアントの画像紐付けをスナップショット時の生存 `MediaImage` IDへ復元。（※Shopify上で既に削除済みの商品は `beforeProductMap`（GID正規化キー）不在または単一GraphQLクエリ `fetchProductWithExistence` の不在判定により `SKIPPED_DELETED` として安全にスキップし、一部バリアント・画像のみ削除済みの生存商品は生存分のみをフィルタして復元を継続する。ロールバック実行中に並行削除で `ownerNotFound` 等が発生した場合も親商品の生存確認のうえ最新ライブ状態を再取得して1回リトライする。なお、Shopify APIの一時障害（`status === "unknown"`）時は削除済みと誤認せず一時エラーとして安全に中断し、`ShopifyAuthError`（401/403）時は握り潰さず `/api/rollback` の Self-Healing（トークン破棄・`REAUTH_REQUIRED` 再認可誘導）へ接続する）
+  4. 隠しメタフィールドの復元：スナップショット時にクリーン画像が存在していた商品および生存バリアントはスナップショット時のメタフィールドを再設定（`RESTORED_TO_SNAPSHOT`）。スナップショット時にクリーン画像が存在しなかった商品および生存バリアントは `metafieldsDelete` ミューテーション（Shopify 2024-10 公式仕様）で親商品とバリアントを分離してメタフィールド（`clean_ad_image_url`, `dual_feed_metadata`）を削除し、削除済みバリアントが一部混入して `ownerNotFound` となった場合も生存バリアントのみを個別削除してクリーンな初期状態へ復元（`PURGED_TO_VIRGIN`、非 `ownerNotFound` エラーの握り潰しは行わない）。削除済み商品は `SKIPPED_DELETED` として記録し、UIの比較テーブルでは Ad Feed 列を `N/A (Deleted)`（日本語: `配信除外（削除済）`）として明示する。
   5. 各商品について **Before Revert（復元直前）** と **After Revert（復元直後）** の構造化差分配列（`productDataDiffs` / `beforeAfterComparisons`）を生成してレスポンスに含める。
 - **レスポンススキーマ (`RollbackExecutionResult`)**:
   ```typescript
@@ -411,6 +411,7 @@ interface SanitizedErrorResponse {
     revertedAt: string;
     storefrontImageUrl: string;              // ストアフロント画像URL (Before/Afterを通じて100%不変)
     storefrontUnchanged: true;               // ストアフロント非破壊証明フラグ
+    skipped?: boolean;                       // Shopify上で削除済み等のためスキップされた場合 true
     beforeRevert: {
       storefrontImageUrl: string;
       cleanAdImageMetafield: string | null;  // ロールバック前の safemedia.clean_ad_image_url 値
@@ -424,7 +425,7 @@ interface SanitizedErrorResponse {
       cleanAdImageMetafield: string | null;  // ロールバック後の safemedia.clean_ad_image_url 値 (復元値または null)
       gmcImageLink: string;                  // ロールバック後の Google Shopping g:image_link 配信URL
       metaImageLink: string;                 // ロールバック後の Meta Catalog image_link 配信URL
-      metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN";
+      metafieldAction: "RESTORED_TO_SNAPSHOT" | "PURGED_TO_VIRGIN" | "SKIPPED_DELETED";
       variantCount: number;
       variantLinksPreserved: boolean;        // バリアント紐付け100%保持 (true)
     };
@@ -434,6 +435,8 @@ interface SanitizedErrorResponse {
     success: boolean;
     restoredCount: number;
     restoredProducts: number;
+    skippedCount?: number;                   // 削除済み等によりスキップされた商品数
+    skippedProductIds?: string[];            // スキップされた商品ID一覧
     snapshotId: string;
     snapshotTimestamp: string;
     revertedAt: string;
