@@ -48,6 +48,7 @@ const IN_FLIGHT_LOCK_TTL_MS = 60_000;
 const WEBHOOK_IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours TTL for X-Shopify-Webhook-Id deduplication
 const OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes TTL for one-time OAuth state nonces
 const MAX_MEMORY_MAP_ENTRIES = 5000;
+const MAX_CATALOG_FETCH_LIMIT = 2000; // Safe upper bound (<= 40 GraphQL subrequests) within Workers limits
 
 interface IdempotencyRecord {
   seenAt: number;
@@ -594,15 +595,14 @@ function getExistingCleanedUrlMap(prod?: ProductSnapshot | null): Record<string,
     prod.dualFeedMetadata?.sourceImageUrl || prod.dualFeedMetadata?.shopifyImageUrl
   );
 
-  if (prod.cleanAdImageUrl) {
-    const legacySources =
-      hasCleanedUrlMap || hasExplicitSourceMeta
-        ? [prod.dualFeedMetadata?.sourceImageUrl, prod.dualFeedMetadata?.shopifyImageUrl]
-        : [
-            prod.dualFeedMetadata?.sourceImageUrl,
-            prod.dualFeedMetadata?.shopifyImageUrl,
-            prod.originalMediaList?.[0]?.url,
-          ];
+  if (prod.cleanAdImageUrl && !hasCleanedUrlMap) {
+    const legacySources = hasExplicitSourceMeta
+      ? [prod.dualFeedMetadata?.sourceImageUrl, prod.dualFeedMetadata?.shopifyImageUrl]
+      : [
+          prod.dualFeedMetadata?.sourceImageUrl,
+          prod.dualFeedMetadata?.shopifyImageUrl,
+          prod.originalMediaList?.[0]?.url,
+        ];
     for (const src of legacySources) {
       setWithNormalized(src, prod.cleanAdImageUrl);
     }
@@ -689,6 +689,9 @@ function buildAdFeedPreview(
   const items: AdFeedPreviewResponse["items"] = [];
 
   for (const p of products) {
+    // Only include ACTIVE products in Google/Meta ad feeds (exclude DRAFT / ARCHIVED to avoid 404s)
+    if (p.status && p.status.toUpperCase() !== "ACTIVE") continue;
+
     const cleanedMap = getExistingCleanedUrlMap(p);
     const variantCleanMap = buildVariantCleanImageMap(p, cleanedMap, p.cleanAdImageUrl);
     const hasAnyClean = Boolean(p.cleanAdImageUrl) || Object.keys(variantCleanMap).length > 0;
@@ -696,10 +699,12 @@ function buildAdFeedPreview(
 
     const numericId = p.productId.replace(/\D/g, "") || "1001";
     const slug =
+      p.handle ||
       p.productTitle
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-|-$/g, "") || `product-${numericId}`;
+        .replace(/^-|-$/g, "") ||
+      `product-${numericId}`;
     const baseStorefrontUrl = `https://${shop}/products/${slug}`;
     const parentOrigUrl = p.originalMediaList[0]?.url || sampleBeforeUrl;
 
@@ -839,15 +844,71 @@ async function syncAdFeedToR2(
   shop: string,
   workerOrigin: string,
   products?: ProductSnapshot[],
-  accessToken?: string
+  accessToken?: string,
+  options?: { excludeProductIds?: string[] }
 ): Promise<{ feedPreview: AdFeedPreviewResponse; xml: string }> {
-  let catalog = products;
-  if (!catalog) {
-    const vm = new ShopifyVariantManager(shop, accessToken || "", env);
-    catalog = await vm.fetchProductsWithVariants().catch(() => []);
+  const excludeSet = new Set<string>();
+  for (const rawId of options?.excludeProductIds || []) {
+    const trimmed = String(rawId || "").trim();
+    if (!trimmed) continue;
+    excludeSet.add(trimmed);
+    const numeric = trimmed.replace(/\D/g, "");
+    if (numeric) {
+      excludeSet.add(numeric);
+      excludeSet.add(`gid://shopify/Product/${numeric}`);
+    }
   }
 
-  const feedPreview = buildAdFeedPreview(shop, catalog, workerOrigin);
+  let feedPreview: AdFeedPreviewResponse | null = null;
+  let catalog = products;
+
+  if (!catalog) {
+    const vm = new ShopifyVariantManager(shop, accessToken || "", env);
+    try {
+      // Fetch full catalog up to safe Workers subrequest cap; exclude explicitly deleted IDs to avoid eventual-consistency lag
+      const fetched = await vm.fetchProductsWithVariants(MAX_CATALOG_FETCH_LIMIT);
+      catalog =
+        excludeSet.size > 0
+          ? fetched.filter((p) => !excludeSet.has(p.productId) && !excludeSet.has(p.productId.replace(/\D/g, "")))
+          : fetched;
+    } catch (fetchErr) {
+      // If a product deletion triggered this sync and Shopify GraphQL transiently failed,
+      // remove the deleted product directly from the cached R2 feed instead of leaving a 404 link.
+      if (excludeSet.size > 0 && env.SNAPSHOT_BUCKET) {
+        const cachedObj = await env.SNAPSHOT_BUCKET.get(`feeds/${shop}/feed.json`).catch(() => null);
+        if (cachedObj) {
+          const existingFeed = (await cachedObj.json()) as AdFeedPreviewResponse;
+          const filteredItems = (existingFeed.items || []).filter(
+            (it) => !excludeSet.has(it.productId) && !excludeSet.has(it.productId.replace(/\D/g, ""))
+          );
+          feedPreview = {
+            ...existingFeed,
+            channelMappings: {
+              googleShopping: {
+                ...existingFeed.channelMappings.googleShopping,
+                status: filteredItems.length > 0 ? "MAPPED_AND_READY" : "READY_WAITING_CLEAN_ITEMS",
+              },
+              metaCatalog: {
+                ...existingFeed.channelMappings.metaCatalog,
+                status: filteredItems.length > 0 ? "MAPPED_AND_READY" : "READY_WAITING_CLEAN_ITEMS",
+              },
+            },
+            items: filteredItems,
+          };
+        } else {
+          throw fetchErr;
+        }
+      } else {
+        throw fetchErr;
+      }
+    }
+  } else if (excludeSet.size > 0) {
+    catalog = catalog.filter((p) => !excludeSet.has(p.productId) && !excludeSet.has(p.productId.replace(/\D/g, "")));
+  }
+
+  if (!feedPreview) {
+    feedPreview = buildAdFeedPreview(shop, catalog || [], workerOrigin);
+  }
   const xml = buildGoogleShoppingRssXml(feedPreview);
 
   if (env.SNAPSHOT_BUCKET) {
@@ -870,6 +931,87 @@ async function syncAdFeedToR2(
   }
 
   return { feedPreview, xml };
+}
+
+/**
+ * Synchronizes the cached R2 supplemental feed when a webhook skips AI inference
+ * (e.g. product archived/drafted, all images removed, auto-sync paused, or quota reached),
+ * ensuring removed/non-active products do not linger in Google/Meta feeds.
+ */
+async function syncFeedIfAffectedOnSkip(
+  env: Env,
+  shop: string,
+  workerOrigin: string,
+  productId: string,
+  opts: {
+    payloadStatus?: string;
+    payloadTitle?: string;
+    hasNoImages?: boolean;
+    accessToken?: string;
+  }
+): Promise<void> {
+  if (!env.SNAPSHOT_BUCKET) return;
+  try {
+    const cachedObj = await env.SNAPSHOT_BUCKET.get(`feeds/${shop}/feed.json`);
+    if (!cachedObj) return;
+    const cachedFeed = (await cachedObj.json()) as AdFeedPreviewResponse;
+    const numericId = productId.replace(/\D/g, "");
+    const existingItems = (cachedFeed.items || []).filter(
+      (it) => it.productId === productId || (numericId && it.productId.replace(/\D/g, "") === numericId)
+    );
+    if (existingItems.length === 0) return;
+
+    const isNonActive = Boolean(opts.payloadStatus && opts.payloadStatus.toUpperCase() !== "ACTIVE");
+    const titleChanged = Boolean(
+      opts.payloadTitle && existingItems.some((it) => !it.productTitle || it.productTitle !== opts.payloadTitle)
+    );
+    if (opts.hasNoImages || isNonActive || titleChanged) {
+      await syncAdFeedToR2(env, shop, workerOrigin, undefined, opts.accessToken);
+    }
+  } catch (err) {
+    console.warn(`[AdFeedSync] Skip-path feed sync failed for ${shop}:`, err);
+  }
+}
+
+/**
+ * Checks whether the cached R2 supplemental feed is out of sync with a product's current
+ * status (ACTIVE vs DRAFT/ARCHIVED), handle, title, or cleaned variant count.
+ */
+async function shouldSyncFeedOnProductUpdate(
+  env: Env,
+  shop: string,
+  prod?: ProductSnapshot | null
+): Promise<boolean> {
+  if (!prod || !env.SNAPSHOT_BUCKET) return false;
+  try {
+    const cachedObj = await env.SNAPSHOT_BUCKET.get(`feeds/${shop}/feed.json`);
+    if (!cachedObj) return true;
+    const cachedFeed = (await cachedObj.json()) as AdFeedPreviewResponse;
+    const existingItems = (cachedFeed.items || []).filter((it) => it.productId === prod.productId);
+    const isActive = !prod.status || prod.status.toUpperCase() === "ACTIVE";
+    const cleanedMap = getExistingCleanedUrlMap(prod);
+    const variantCleanMap = buildVariantCleanImageMap(prod, cleanedMap, prod.cleanAdImageUrl);
+    const expectedUrls =
+      prod.variants && prod.variants.length > 0
+        ? prod.variants.map((v) => variantCleanMap[v.variantId]).filter((u): u is string => Boolean(u))
+        : prod.cleanAdImageUrl
+          ? [prod.cleanAdImageUrl]
+          : [];
+    const shouldBeInFeed = isActive && expectedUrls.length > 0;
+    if (!shouldBeInFeed) {
+      return existingItems.length > 0;
+    }
+    if (existingItems.length !== expectedUrls.length) return true;
+    if (prod.handle && existingItems.some((it) => !it.storefrontUrl.includes(`/products/${prod.handle}`))) {
+      return true;
+    }
+    if (existingItems.some((it) => !it.productTitle || it.productTitle !== prod.productTitle)) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1639,7 +1781,37 @@ async function loadShopJobState(env: Env, shop: string): Promise<BatchJobState> 
   return getShopJobState(shop);
 }
 
-async function saveShopJobState(env: Env, shop: string, state: BatchJobState): Promise<void> {
+async function saveShopJobState(
+  env: Env,
+  shop: string,
+  state: BatchJobState,
+  options?: { allowRestartFromStopped?: boolean }
+): Promise<boolean> {
+  if (!options?.allowRestartFromStopped && (state.status === "RUNNING" || state.status === "COMPLETED")) {
+    let currentStatus = jobStatesByShop.get(shop)?.status;
+    if (env.SNAPSHOT_BUCKET) {
+      const r2Key = `state/${shop}/job.json`;
+      try {
+        const obj = await env.SNAPSHOT_BUCKET.get(r2Key);
+        if (obj) {
+          const parsed = (await obj.json()) as BatchJobState;
+          currentStatus = parsed.status;
+          if (parsed.status === "ABORTED" || parsed.status === "CANCELLED") {
+            jobStatesByShop.set(shop, parsed);
+          }
+        }
+      } catch (e) {
+        console.warn(`[BatchJob] Failed to check current job state from R2 for ${shop}:`, e);
+      }
+    }
+    if (currentStatus === "ABORTED" || currentStatus === "CANCELLED") {
+      console.log(
+        `[BatchJob] Prevented overwriting ${currentStatus} state with ${state.status} for ${shop}.`
+      );
+      return false;
+    }
+  }
+
   state.updatedAt = new Date().toISOString();
   jobStatesByShop.set(shop, state);
   if (env.SNAPSHOT_BUCKET) {
@@ -1652,6 +1824,7 @@ async function saveShopJobState(env: Env, shop: string, state: BatchJobState): P
       console.warn(`[BatchJob] Failed to save job state to R2 for ${shop}:`, e);
     }
   }
+  return true;
 }
 
 interface BatchLockData {
@@ -1830,6 +2003,12 @@ async function runBatchChunk(
     const products = await variantManager.fetchProductsWithVariants();
     await refreshBatchLock(env, shop);
 
+    const postFetchJob = await loadShopJobState(env, shop);
+    if (postFetchJob.status !== "RUNNING") {
+      console.log(`[BatchRunner] Job status changed to ${postFetchJob.status} during catalog fetch for ${shop}`);
+      return;
+    }
+
     jobState.total = products.length;
     if (!jobState.cleanedProductIds) {
       jobState.cleanedProductIds = [];
@@ -1857,7 +2036,9 @@ async function runBatchChunk(
     jobState.processed = alreadyDoneCount;
     jobState.avgProcessingSec = jobState.avgProcessingSec || 6.8;
     jobState.estimatedRemainingSec = Math.max(0, Math.round(pendingProducts.length * jobState.avgProcessingSec));
-    await saveShopJobState(env, shop, jobState);
+    if (!(await saveShopJobState(env, shop, jobState))) {
+      return;
+    }
 
     const chunkStartTime = Date.now();
     let itemsCleanedInThisChunk = 0;
@@ -1940,7 +2121,9 @@ async function runBatchChunk(
       try {
         jobState.currentProductId = prod.productId;
         jobState.currentProductTitle = prod.productTitle;
-        await saveShopJobState(env, shop, jobState);
+        if (!(await saveShopJobState(env, shop, jobState))) {
+          return;
+        }
 
         let succeededInProd = 0;
         let erroredInProd = 0;
@@ -1978,7 +2161,9 @@ async function runBatchChunk(
           jobState.cleanedProductIds = Array.from(cleanedIdSet);
           jobState.processed++;
           jobState.skippedCount = (jobState.skippedCount || 0) + 1;
-          await saveShopJobState(env, shop, jobState);
+          if (!(await saveShopJobState(env, shop, jobState))) {
+            return;
+          }
           continue;
         }
 
@@ -2145,6 +2330,21 @@ async function runBatchChunk(
           cursor += slice.length;
         }
 
+        // Re-check abort / cancel / circuit breaker after AI inference before writing metafields or saving state
+        const postAiJob = await loadShopJobState(env, shop);
+        if (postAiJob.status === "ABORTED" || postAiJob.status === "CANCELLED") {
+          console.log(`[BatchRunner] Job ${postAiJob.status} during AI inference for ${shop}; skipping metafield update.`);
+          return;
+        }
+        const postAiBilling = await getShopBillingState(env, shop);
+        if (postAiBilling.circuitBreakerTripped) {
+          postAiJob.status = "ABORTED";
+          postAiJob.estimatedRemainingSec = 0;
+          postAiJob.finishedAt = new Date().toISOString();
+          await saveShopJobState(env, shop, postAiJob);
+          return;
+        }
+
         if (succeededInProd > 0) {
           const primaryCleanUrl =
             lookupCleanedImageUrl(mergedCleanedMap, primarySrcUrl) ||
@@ -2189,7 +2389,9 @@ async function runBatchChunk(
 
         const remaining = Math.max(0, jobState.total - jobState.processed);
         jobState.estimatedRemainingSec = Math.max(0, Math.round(remaining * (jobState.avgProcessingSec || 6.8)));
-        await saveShopJobState(env, shop, jobState);
+        if (!(await saveShopJobState(env, shop, jobState))) {
+          return;
+        }
 
         if (!allUniqueCleaned && !finishedWithErrors) {
           // Product partially cleaned due to chunk image/time budget; yield to next chunk seamlessly
@@ -2206,7 +2408,9 @@ async function runBatchChunk(
       jobState.estimatedRemainingSec = 0;
       jobState.currentProductId = undefined;
       jobState.currentProductTitle = undefined;
-      await saveShopJobState(env, shop, jobState);
+      if (!(await saveShopJobState(env, shop, jobState))) {
+        return;
+      }
       console.log(`[BatchRunner] Full catalog batch completed for ${shop}. Total: ${jobState.total}`);
     }
 
@@ -2539,6 +2743,9 @@ export default {
               await purgeR2Prefix(env.SNAPSHOT_BUCKET, `state/${webhookShop}/`).catch(() => 0);
               await purgeR2Prefix(env.SNAPSHOT_BUCKET, `snapshots/${webhookShop}/`).catch(() => 0);
               await purgeR2Prefix(env.SNAPSHOT_BUCKET, `clean_images/${webhookShop}/`).catch(() => 0);
+              await purgeR2Prefix(env.SNAPSHOT_BUCKET, `feeds/${webhookShop}/`).catch(() => 0);
+              await purgeR2Prefix(env.SNAPSHOT_BUCKET, `dedup/${webhookShop}/`).catch(() => 0);
+              await purgeR2Prefix(env.SNAPSHOT_BUCKET, `locks/${webhookShop}/`).catch(() => 0);
             } catch (err) {
               console.warn("[Shop Redact] Cleanup warning:", err);
             }
@@ -2956,16 +3163,17 @@ function renderOAuthEscapeHtml(authUrl: string): string {
       }
       await saveShopBillingState(env, tenantBilling);
 
-      // Auto-register Shopify PRODUCTS_UPDATE Webhook & pin PRODUCT + PRODUCTVARIANT Metafield Definitions
+      // Declarative webhooks are managed via shopify.app.toml; clean up legacy API-registered
+      // PRODUCTS_UPDATE webhooks to prevent duplicate deliveries, and pin Metafield Definitions
       try {
         const vm = new ShopifyVariantManager(requestedShop, accessToken, env);
-        const callbackUrl = `${env.APP_URL || url.origin}/webhooks/products/update`;
+        const legacyCallbackUrl = `${env.APP_URL || url.origin}/webhooks/products/update`;
         await Promise.allSettled([
-          vm.registerProductUpdateWebhook(callbackUrl),
+          vm.unregisterProductUpdateWebhook(legacyCallbackUrl),
           vm.ensureCleanAdMetafieldDefinition(),
         ]);
       } catch (err) {
-        console.warn("[OAuth] Auto webhook/metafield registration warning:", err);
+        console.warn("[OAuth] Auto metafield/legacy-webhook cleanup warning:", err);
       }
 
       // Redirect into Shopify Admin Embedded App
@@ -3053,7 +3261,9 @@ function renderOAuthEscapeHtml(authUrl: string): string {
 
     const canWaitUntil = Boolean(ctx && typeof ctx.waitUntil === "function");
     const isAsyncProductWebhook =
-      url.pathname === "/webhooks/products/update" && request.method === "POST" && canWaitUntil;
+      (url.pathname === "/webhooks/products/update" || url.pathname === "/webhooks/products/create") &&
+      request.method === "POST" &&
+      canWaitUntil;
 
     const variantManager = new ShopifyVariantManager(requestedShop, activeToken, env);
     const snapshotEngine = new SnapshotEngine(env, requestedShop);
@@ -3245,7 +3455,34 @@ function renderOAuthEscapeHtml(authUrl: string): string {
 
       // If not cached or refresh requested: build, cache to R2, and return
       await variantManager.ensureCleanAdMetafieldDefinition().catch(() => {});
-      const products = await variantManager.fetchProductsWithVariants().catch(() => []);
+      let products: ProductSnapshot[];
+      try {
+        products = await variantManager.fetchProductsWithVariants(MAX_CATALOG_FETCH_LIMIT);
+      } catch (fetchErr: unknown) {
+        // Fail-Safe Cache Protection: preserve existing R2 feed cache on transient GraphQL errors
+        if (env.SNAPSHOT_BUCKET) {
+          try {
+            const cacheKey = isXml
+              ? `feeds/${requestedShop}/google-shopping.xml`
+              : `feeds/${requestedShop}/feed.json`;
+            const fallbackObj = await env.SNAPSHOT_BUCKET.get(cacheKey);
+            if (fallbackObj) {
+              const contentType = isXml
+                ? "application/xml; charset=utf-8"
+                : "application/json; charset=utf-8";
+              return new Response(fallbackObj.body, {
+                headers: {
+                  "Content-Type": contentType,
+                  "X-AdFeed-Source": "R2-Stale-Fallback",
+                  ...corsHeaders,
+                },
+              });
+            }
+          } catch {}
+        }
+        const sanitized = sanitizeUserError(fetchErr);
+        return Response.json(sanitized.body, { status: sanitized.status, headers: corsHeaders });
+      }
       const { feedPreview, xml } = await syncAdFeedToR2(env, requestedShop, url.origin, products, activeToken);
 
       if (isXml) {
@@ -3593,15 +3830,25 @@ function renderOAuthEscapeHtml(authUrl: string): string {
       return Response.json({ success: true, billing: billingState }, { headers: corsHeaders });
     }
 
-    // 2.2 API: Register (Enable) Shopify PRODUCTS_UPDATE Webhook
+    // 2.2 API: Enable Auto-Sync (Webhooks are managed declaratively via shopify.app.toml)
     if (url.pathname === "/api/webhooks/register" && request.method === "POST") {
       try {
-        const callbackUrl = `${url.origin}/webhooks/products/update`;
-        const result = await variantManager.registerProductUpdateWebhook(callbackUrl);
+        const callbackUrl = `${env.APP_URL || url.origin}/webhooks/products/update`;
+        // Clean up any legacy API-registered webhook to avoid duplicate deliveries alongside shopify.app.toml
+        await variantManager.unregisterProductUpdateWebhook(callbackUrl).catch(() => {});
         billingState.autoSyncEnabled = true;
-        billingState.webhookId = result.webhookId;
+        billingState.webhookId = "declarative:shopify.app.toml";
         await saveShopBillingState(env, billingState);
-        return Response.json({ ...result, autoSyncEnabled: true }, { headers: corsHeaders });
+        return Response.json(
+          {
+            success: true,
+            webhookId: billingState.webhookId,
+            callbackUrl,
+            alreadyRegistered: true,
+            autoSyncEnabled: true,
+          },
+          { headers: corsHeaders }
+        );
       } catch (err: unknown) {
         if (
           err instanceof ShopifyAuthError ||
@@ -3628,15 +3875,20 @@ function renderOAuthEscapeHtml(authUrl: string): string {
       }
     }
 
-    // 2.2b API: Unregister (Disable) Shopify PRODUCTS_UPDATE Webhook
+    // 2.2b API: Disable Auto-Sync (Pauses background AI cleanup; products/delete remains active for feed integrity)
     if (url.pathname === "/api/webhooks/unregister" && request.method === "POST") {
       try {
-        const callbackUrl = `${url.origin}/webhooks/products/update`;
-        const result = await variantManager.unregisterProductUpdateWebhook(callbackUrl);
+        const callbackUrl = `${env.APP_URL || url.origin}/webhooks/products/update`;
+        const cleanup = await variantManager
+          .unregisterProductUpdateWebhook(callbackUrl)
+          .catch(() => ({ success: true, deletedCount: 0, callbackUrl }));
         billingState.autoSyncEnabled = false;
         billingState.webhookId = undefined;
         await saveShopBillingState(env, billingState);
-        return Response.json({ ...result, autoSyncEnabled: false }, { headers: corsHeaders });
+        return Response.json(
+          { ...cleanup, autoSyncEnabled: false },
+          { headers: corsHeaders }
+        );
       } catch (err: unknown) {
         if (
           err instanceof ShopifyAuthError ||
@@ -3820,10 +4072,59 @@ function renderOAuthEscapeHtml(authUrl: string): string {
           );
         }
 
-        const [cbBillingState, cbToken] = await Promise.all([
+        const cbSnapshotEngine = new SnapshotEngine(env, callbackShop);
+        const [cbBillingState, cbToken, cbLastRollback] = await Promise.all([
           getShopBillingState(env, callbackShop),
           getStoredShopAccessToken(env, callbackShop),
+          cbSnapshotEngine.getLastRollbackResult(),
         ]);
+
+        // Rollback Suppression Guard on Async RunPod Callback:
+        // If the merchant rolled back the store to Virgin state while a RunPod job was in flight,
+        // do not re-populate product/variant metafields or overwrite the R2 supplemental feed.
+        if (cbLastRollback) {
+          const cbNumericId = callbackProductId.replace(/\D/g, "");
+          const rbDiff = (cbLastRollback.productDataDiffs || []).find(
+            (d) =>
+              d.productId === callbackProductId ||
+              (cbNumericId && (d.productId === cbNumericId || d.productId.endsWith(`/${cbNumericId}`)))
+          );
+          if (rbDiff && !rbDiff.clearedAfterRollback && !rbDiff.skipped) {
+            const isRollbackInProgress = cbLastRollback.message === "Rollback in progress...";
+            const revertedMs = rbDiff.revertedAt ? new Date(rbDiff.revertedAt).getTime() : 0;
+            const timeSinceRevertMs = Date.now() - revertedMs;
+            const isRecentRollback = isRollbackInProgress || (timeSinceRevertMs >= 0 && timeSinceRevertMs < 120_000);
+            const isPurgedToVirgin = rbDiff.afterRevert?.metafieldAction === "PURGED_TO_VIRGIN";
+
+            if (isRecentRollback || isPurgedToVirgin) {
+              if (canaryReserved) {
+                cbBillingState.canaryUsedCount = Math.max(0, cbBillingState.canaryUsedCount - 1);
+                await saveShopBillingState(env, cbBillingState);
+              }
+              if (trialReserved) {
+                cbBillingState.trialUsedCount = Math.max(0, (cbBillingState.trialUsedCount ?? 1) - 1);
+                await saveShopBillingState(env, cbBillingState);
+              }
+              if (callbackWebhookId) {
+                await markWebhookProcessed(env, callbackShop, callbackWebhookId);
+              }
+              await releaseInFlightLock(env, callbackShop, callbackProductId);
+              if (callbackSlotId > 0) {
+                await releaseGpuSlot(env, callbackShop, callbackSlotId);
+              }
+              return Response.json(
+                {
+                  success: true,
+                  skipped: true,
+                  reason: "reverted_by_rollback",
+                  productId: callbackProductId,
+                  revertedAt: rbDiff.revertedAt,
+                },
+                { headers: corsHeaders }
+              );
+            }
+          }
+        }
 
         const cbVariantManager = new ShopifyVariantManager(callbackShop, cbToken || activeToken, env);
         const targetSourceUrl = callbackImageUrl || `https://${callbackShop}/cdn/shop/products/image.jpg`;
@@ -3846,19 +4147,19 @@ function renderOAuthEscapeHtml(authUrl: string): string {
           [targetSourceUrl]: cleanResult.cleanAdImageUrl,
         };
         const primarySrcUrl = cbProduct?.originalMediaList?.[0]?.url || callbackShopifyImg || targetSourceUrl;
-        const primaryCleanUrl =
-          lookupCleanedImageUrl(mergedCleanedMap, primarySrcUrl) ||
-          cleanResult.cleanAdImageUrl;
+        const resolvedPrimaryClean = lookupCleanedImageUrl(mergedCleanedMap, primarySrcUrl);
+        const primaryCleanUrl = resolvedPrimaryClean || cleanResult.cleanAdImageUrl;
+        const effectiveSourceUrl = resolvedPrimaryClean ? primarySrcUrl : targetSourceUrl;
         const variantCleanImageMap = cbProduct
-          ? buildVariantCleanImageMap(cbProduct, mergedCleanedMap, primaryCleanUrl)
+          ? buildVariantCleanImageMap(cbProduct, mergedCleanedMap, resolvedPrimaryClean)
           : {};
 
         await cbVariantManager.setCleanAdImageMetafield(
           callbackProductId,
           primaryCleanUrl,
           {
-            sourceImageUrl: primarySrcUrl,
-            shopifyImageUrl: primarySrcUrl,
+            sourceImageUrl: effectiveSourceUrl,
+            shopifyImageUrl: effectiveSourceUrl,
             cleanedAt: new Date().toISOString(),
             maskCoveragePct: cleanResult.maskCoveragePct,
             processingSec: cleanResult.processingSec,
@@ -3901,8 +4202,11 @@ function renderOAuthEscapeHtml(authUrl: string): string {
       }
     }
 
-    // 2.3 Webhook Receiver: Shopify `products/update` (Zero-UI Event-Driven Dual-Feed Routing)
-    if (url.pathname === "/webhooks/products/update" && request.method === "POST") {
+    // 2.3 Webhook Receiver: Shopify `products/create` & `products/update` (Zero-UI Event-Driven Dual-Feed Routing)
+    if (
+      (url.pathname === "/webhooks/products/update" || url.pathname === "/webhooks/products/create") &&
+      request.method === "POST"
+    ) {
       try {
         // Security Guard 3: Require explicit X-Shopify-Shop-Domain header on Webhook route
         if (!shopHeader) {
@@ -3971,6 +4275,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
         interface ProductWebhookPayload {
           id?: string | number;
           title?: string;
+          status?: string;
           image?: { src?: string };
           images?: Array<{ src?: string }>;
           media?: Array<{ preview?: { image?: { url?: string } }; image?: { url?: string }; src?: string }>;
@@ -4007,6 +4312,20 @@ function renderOAuthEscapeHtml(authUrl: string): string {
         const hasExplicitEmptyImageFields =
           ("image" in payload || "images" in payload) && !primaryImageUrl;
         if (hasExplicitEmptyImageFields || (!primaryImageUrl && !canWaitUntil)) {
+          const skipSyncPromise = (async () => {
+            const stored = await getStoredShopAccessToken(env, requestedShop);
+            await syncFeedIfAffectedOnSkip(env, requestedShop, url.origin, productId, {
+              payloadStatus: typeof payload.status === "string" ? payload.status : undefined,
+              payloadTitle: typeof payload.title === "string" ? payload.title : undefined,
+              hasNoImages: true,
+              accessToken: stored || activeToken,
+            });
+          })();
+          if (canWaitUntil) {
+            ctx.waitUntil(skipSyncPromise.catch(() => {}));
+          } else {
+            await skipSyncPromise.catch(() => {});
+          }
           return Response.json({ skipped: true, reason: "no_product_image" }, { headers: corsHeaders });
         }
 
@@ -4053,8 +4372,18 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             };
           }
 
+          const syncAffectedOnSkip = async (hasNoImages = false) => {
+            await syncFeedIfAffectedOnSkip(env, requestedShop, url.origin, productId, {
+              payloadStatus: typeof payload.status === "string" ? payload.status : undefined,
+              payloadTitle: typeof payload.title === "string" ? payload.title : undefined,
+              hasNoImages,
+              accessToken: storedToken || activeToken,
+            });
+          };
+
           // Circuit Breaker Guard: Halt background processing if merchant clicked Emergency Stop
           if (activeBillingState.circuitBreakerTripped) {
+            await syncAffectedOnSkip(false);
             await releaseClaimedWebhookId();
             return {
               status: 423,
@@ -4069,6 +4398,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
 
           // Check if Auto-Sync was explicitly disabled by the merchant
           if (activeBillingState.autoSyncEnabled === false) {
+            await syncAffectedOnSkip(false);
             return {
               status: 200,
               body: {
@@ -4085,6 +4415,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             activeBillingState.planStatus === "CANARY_TRIAL" &&
             activeBillingState.canaryUsedCount >= activeBillingState.canaryLimit
           ) {
+            await syncAffectedOnSkip(false);
             await releaseClaimedWebhookId();
             return {
               status: 402,
@@ -4109,6 +4440,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             if (activeBillingState.planStatus === "TRIAL_CAP_REACHED" || trialUsed >= trialLimit) {
               activeBillingState.planStatus = "TRIAL_CAP_REACHED";
               await saveShopBillingState(env, activeBillingState);
+              await syncAffectedOnSkip(false);
               await releaseClaimedWebhookId();
               return {
                 status: 402,
@@ -4128,36 +4460,16 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             ? new ShopifyVariantManager(requestedShop, webhookToken, env)
             : variantManager;
 
-          // Parallelize GPU Slot Acquisition, In-Flight Lock, Shopify GraphQL Product Fetch, Virgin Snapshot Check, and Last Rollback Check
-          const [slotResult, hasLock, targetProd, latestSnap, lastRollback] = await Promise.all([
-            acquireGpuSlot(env, requestedShop, productId),
+          // Parallelize In-Flight Lock, Shopify GraphQL Product Fetch, Virgin Snapshot Check, and Last Rollback Check
+          // (GPU slot is acquired only after verifying that this webhook is not an already-cleaned or rollback-reverted echo)
+          const [hasLock, targetProd, latestSnap, lastRollback] = await Promise.all([
             acquireInFlightLock(env, requestedShop, productId),
             webhookVariantManager.fetchProductById(productId),
             snapshotEngine.getLatestSnapshot(),
             snapshotEngine.getLastRollbackResult(),
           ]);
 
-          if (!slotResult.acquired) {
-            if (hasLock) {
-              await releaseInFlightLock(env, requestedShop, productId);
-            }
-            await releaseClaimedWebhookId();
-            return {
-              status: 200,
-              body: {
-                success: true,
-                skipped: true,
-                reason: "concurrency_limit_exceeded",
-                productId,
-                message: "Concurrent GPU execution limit (2 slots) reached. Queued/skipped to avoid burst costs.",
-              },
-            };
-          }
-
           if (!hasLock) {
-            if (slotResult.slotId) {
-              await releaseGpuSlot(env, requestedShop, slotResult.slotId);
-            }
             await releaseClaimedWebhookId();
             return {
               status: 200,
@@ -4170,6 +4482,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             };
           }
 
+          let slotResult: { acquired: boolean; slotId?: number } = { acquired: false };
           let canaryQuotaReserved = false;
           let trialReservedCount = 0;
           let keepLocksForCallback = false;
@@ -4186,6 +4499,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
             ]);
 
             if (uniqueImageUrls.length === 0) {
+              await syncAffectedOnSkip(true);
               return {
                 status: 200,
                 body: { skipped: true, reason: "no_product_image" },
@@ -4212,6 +4526,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
               (targetProd?.cleanAdImageUrl || Object.keys(existingCleanedMap).length > 0) &&
               !payload.force_reclean
             ) {
+              let didSyncFeed = false;
               // Fan-out to any new variants sharing an already-cleaned image URL with zero GPU cost
               if (targetProd) {
                 const primaryClean =
@@ -4240,8 +4555,14 @@ function renderOAuthEscapeHtml(authUrl: string): string {
                       syncedVarMap
                     );
                     await syncAdFeedToR2(env, requestedShop, url.origin, undefined, webhookToken).catch(() => {});
+                    didSyncFeed = true;
                   }
                 }
+              }
+
+              // Keep R2 supplemental feed synchronized if product status (ACTIVE <-> DRAFT/ARCHIVED), handle, title, or variants changed
+              if (!didSyncFeed && (await shouldSyncFeedOnProductUpdate(env, requestedShop, targetProd))) {
+                await syncAdFeedToR2(env, requestedShop, url.origin, undefined, webhookToken).catch(() => {});
               }
 
               if (webhookIdHeader) {
@@ -4261,23 +4582,54 @@ function renderOAuthEscapeHtml(authUrl: string): string {
 
             const effectiveImageUrl = uncleanedUrls[0] || currentShopifyImg;
 
-            // Rollback Suppression Guard:
+            // Rollback Suppression Guard (Multi-Variant Aware):
             // Prevent webhook echoes or subsequent product/inventory edits from triggering auto-cleanup
             // and incrementing Monthly Usage when a product was restored to virgin snapshot state via 1-Click Rollback.
             if (lastRollback && !payload.force_reclean) {
               const rbDiff = (lastRollback.productDataDiffs || []).find(
-                (d) => d.productId === productId || d.productId === String(productNumericId)
+                (d) =>
+                  d.productId === productId ||
+                  d.productId === String(productNumericId) ||
+                  d.productId.endsWith(`/${productNumericId}`)
               );
               if (rbDiff && !rbDiff.clearedAfterRollback && !rbDiff.skipped) {
+                const snapProd =
+                  latestSnap?.products?.[productId] ||
+                  latestSnap?.products?.[String(productNumericId)] ||
+                  Object.values(latestSnap?.products || {}).find(
+                    (sp) => sp.productId === productId || sp.productId.endsWith(`/${productNumericId}`)
+                  );
+                const allowedRollbackUrls = new Set<string>(
+                  [
+                    rbDiff.storefrontImageUrl,
+                    rbDiff.afterRevert?.storefrontImageUrl,
+                    ...(rbDiff.storefrontImageUrls || []),
+                    ...(snapProd?.originalMediaList || []).map((m) => m.url),
+                    ...(snapProd?.variants || []).map((v) => v.originalImageUrl),
+                  ]
+                    .filter((u): u is string => Boolean(u))
+                    .map((u) => normalizeImageUrlKey(u))
+                );
+
                 const isSameImageAsRollback =
                   rbDiff.storefrontImageUrl === effectiveImageUrl ||
                   rbDiff.afterRevert?.storefrontImageUrl === effectiveImageUrl ||
-                  rbDiff.storefrontImageUrl === currentShopifyImg;
+                  rbDiff.storefrontImageUrl === currentShopifyImg ||
+                  normalizeImageUrlKey(rbDiff.storefrontImageUrl) === normalizeImageUrlKey(currentShopifyImg) ||
+                  allowedRollbackUrls.has(normalizeImageUrlKey(effectiveImageUrl));
 
-                if (isSameImageAsRollback && uncleanedUrls.every((u) => u === rbDiff.storefrontImageUrl || u === currentShopifyImg)) {
+                const allUncleanedInRollbackSet = uncleanedUrls.every(
+                  (u) =>
+                    u === rbDiff.storefrontImageUrl ||
+                    u === currentShopifyImg ||
+                    allowedRollbackUrls.has(normalizeImageUrlKey(u))
+                );
+
+                if (isSameImageAsRollback && allUncleanedInRollbackSet) {
+                  const isRollbackInProgress = lastRollback.message === "Rollback in progress...";
                   const revertedMs = rbDiff.revertedAt ? new Date(rbDiff.revertedAt).getTime() : 0;
                   const timeSinceRevertMs = Date.now() - revertedMs;
-                  const isRecentRollback = timeSinceRevertMs >= 0 && timeSinceRevertMs < 120_000;
+                  const isRecentRollback = isRollbackInProgress || (timeSinceRevertMs >= 0 && timeSinceRevertMs < 120_000);
                   const isPurgedToVirgin = rbDiff.afterRevert?.metafieldAction === "PURGED_TO_VIRGIN";
 
                   if (isRecentRollback || isPurgedToVirgin) {
@@ -4300,9 +4652,26 @@ function renderOAuthEscapeHtml(authUrl: string): string {
               }
             }
 
-            // Ensure initial virgin snapshot exists before modifying metafields
+            // Acquire GPU Slot only after confirming that AI inference is actually required
+            slotResult = await acquireGpuSlot(env, requestedShop, productId);
+            if (!slotResult.acquired) {
+              await releaseClaimedWebhookId();
+              return {
+                status: 200,
+                body: {
+                  success: true,
+                  skipped: true,
+                  reason: "concurrency_limit_exceeded",
+                  productId,
+                  message: "Concurrent GPU execution limit (2 slots) reached. Queued/skipped to avoid burst costs.",
+                },
+              };
+            }
+
+            // Ensure initial virgin snapshot exists with the full store catalog before modifying metafields
             if (!latestSnap) {
-              const initialCatalog = targetProd ? [targetProd] : [];
+              const fullCatalog = await webhookVariantManager.fetchProductsWithVariants().catch(() => [] as ProductSnapshot[]);
+              const initialCatalog = fullCatalog.length > 0 ? fullCatalog : targetProd ? [targetProd] : [];
               if (initialCatalog.length > 0) {
                 await snapshotEngine.createSnapshot(initialCatalog).catch(() => {});
               }
@@ -4714,12 +5083,60 @@ function renderOAuthEscapeHtml(authUrl: string): string {
           return Response.json({ error: "Invalid JSON payload" }, { status: 400, headers: corsHeaders });
         }
 
+        const webhookIdHeader = request.headers.get("X-Shopify-Webhook-Id");
+        if (webhookIdHeader) {
+          const dedupKey = `${requestedShop}:${webhookIdHeader.trim()}`;
+          const seenAt = processedWebhookIds.get(dedupKey);
+          if (seenAt && Date.now() - seenAt < WEBHOOK_IDEMPOTENCY_TTL_MS) {
+            return Response.json(
+              {
+                success: true,
+                skipped: true,
+                reason: "duplicate_webhook_id",
+                webhookId: webhookIdHeader,
+                message: "Duplicate Shopify products/delete webhook event ignored (idempotent).",
+              },
+              { headers: corsHeaders }
+            );
+          }
+        }
+
         const deletedProductId = payload.id ? String(payload.id) : "";
         if (deletedProductId) {
-          const webhookToken = (await getStoredShopAccessToken(env, requestedShop)) || activeToken;
-          const vm = new ShopifyVariantManager(requestedShop, webhookToken, env);
-          await vm.clearCleanAdImageMetafield(deletedProductId).catch(() => {});
-          await syncAdFeedToR2(env, requestedShop, url.origin, undefined, webhookToken).catch(() => {});
+          const runDeleteSync = async () => {
+            const idempotencyClaimed = webhookIdHeader
+              ? await claimWebhookIdempotency(env, requestedShop, webhookIdHeader.trim())
+              : true;
+            if (!idempotencyClaimed) return;
+
+            const webhookToken = (await getStoredShopAccessToken(env, requestedShop)) || activeToken;
+            if (!webhookToken || webhookToken.startsWith("mock_")) {
+              const vm = new ShopifyVariantManager(requestedShop, webhookToken, env);
+              await vm.clearCleanAdImageMetafield(deletedProductId).catch(() => {});
+            }
+            await syncAdFeedToR2(env, requestedShop, url.origin, undefined, webhookToken, {
+              excludeProductIds: [deletedProductId],
+            }).catch((syncErr) => {
+              console.warn(`[ProductsDelete] R2 feed sync failed for ${requestedShop}:`, syncErr);
+            });
+            if (webhookIdHeader) {
+              await markWebhookProcessed(env, requestedShop, webhookIdHeader.trim());
+            }
+          };
+
+          if (canWaitUntil) {
+            ctx.waitUntil(
+              runDeleteSync().catch((bgErr) => {
+                console.error(`[ProductsDelete Background Error] for ${requestedShop}:`, bgErr);
+              })
+            );
+            return Response.json(
+              { success: true, accepted: true, deletedProductId },
+              { status: 200, headers: corsHeaders }
+            );
+          }
+
+          await runDeleteSync();
         }
 
         return Response.json({ success: true, deletedProductId }, { status: 200, headers: corsHeaders });
@@ -5599,7 +6016,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
         updatedAt: new Date().toISOString(),
         finishedAt: pendingProducts.length === 0 ? new Date().toISOString() : undefined,
       };
-      await saveShopJobState(env, requestedShop, newJobState);
+      await saveShopJobState(env, requestedShop, newJobState, { allowRestartFromStopped: true });
 
       if (newJobState.status === "RUNNING") {
         if (ctx && typeof ctx.waitUntil === "function") {
@@ -5659,7 +6076,7 @@ function renderOAuthEscapeHtml(authUrl: string): string {
       if (currentJob.status === "ABORTED" && currentJob.processed < currentJob.total) {
         currentJob.status = "RUNNING";
         currentJob.finishedAt = undefined;
-        await saveShopJobState(env, requestedShop, currentJob);
+        await saveShopJobState(env, requestedShop, currentJob, { allowRestartFromStopped: true });
         if (ctx && typeof ctx.waitUntil === "function") {
           ctx.waitUntil(runBatchChunk(env, requestedShop, url.origin, activeToken));
         } else {
@@ -5739,6 +6156,21 @@ function renderOAuthEscapeHtml(authUrl: string): string {
       }
 
       try {
+        // Matrix A-2-2 / A-3-2 Guard: Halt any RUNNING batch and clear cached cleanedProductIds
+        // so /api/status polling or subsequent resume does not overwrite or skip rolled-back products.
+        const currentJob = await loadShopJobState(env, requestedShop);
+        if (currentJob.status === "RUNNING") {
+          currentJob.status = "CANCELLED";
+          currentJob.estimatedRemainingSec = 0;
+          currentJob.finishedAt = new Date().toISOString();
+          currentJob.cleanedProductIds = [];
+          await saveShopJobState(env, requestedShop, currentJob);
+          await releaseBatchLock(env, requestedShop);
+        } else if (currentJob.cleanedProductIds && currentJob.cleanedProductIds.length > 0) {
+          currentJob.cleanedProductIds = [];
+          await saveShopJobState(env, requestedShop, currentJob);
+        }
+
         const snapshotIdFromBody = typeof bodyCloneJson?.snapshotId === "string" ? bodyCloneJson.snapshotId : undefined;
         const requestedSnapshotId = snapshotIdFromBody || url.searchParams.get("snapshotId") || undefined;
         const result = await snapshotEngine.rollbackToSnapshot(variantManager, requestedSnapshotId);

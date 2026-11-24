@@ -33,6 +33,8 @@ export interface ProductSnapshot {
   productId: string;
   productTitle: string;
   title?: string;
+  handle?: string;
+  status?: string;
   bodyHtml: string;
   variants: VariantMapping[];
   originalMediaList: MediaItem[];
@@ -200,6 +202,7 @@ export interface RollbackProductDataDiff {
   snapshotId: string;
   revertedAt: string;
   storefrontImageUrl: string;
+  storefrontImageUrls?: string[];
   storefrontUnchanged: true;
   beforeRevert: {
     storefrontImageUrl: string;

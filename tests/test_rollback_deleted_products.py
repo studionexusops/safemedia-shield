@@ -260,6 +260,174 @@ print('RESULT_JSON:' + JSON.stringify({{ enHtml, jaHtml }}));
         self.assertIn('msg.includes("invalid media")', self.snapshot_ts)
         self.assertIn('msg.includes("invalid variant")', self.snapshot_ts)
 
+    def test_multi_variant_rollback_suppression_and_runpod_callback_guard(self) -> None:
+        # 1. types.ts and snapshot.ts must record storefrontImageUrls across parent and all variants
+        self.assertIn("storefrontImageUrls?: string[];", self.types_ts)
+        self.assertIn("function collectStorefrontImageUrls(", self.snapshot_ts)
+        self.assertIn("storefrontImageUrls,", self.snapshot_ts)
+
+        # 2. index.ts /webhooks/products/update must check Rollback Suppression Guard BEFORE acquireGpuSlot
+        wh_section_match = re.search(
+            r"// Parallelize In-Flight Lock[\s\S]*?slotResult = await acquireGpuSlot\(env, requestedShop, productId\);",
+            self.index_ts,
+        )
+        self.assertIsNotNone(
+            wh_section_match,
+            "Rollback Suppression Guard must be evaluated before acquireGpuSlot in /webhooks/products/update",
+        )
+        wh_section = wh_section_match.group(0)
+        self.assertIn("allUncleanedInRollbackSet", wh_section)
+        self.assertIn("rbDiff.storefrontImageUrls", wh_section)
+        self.assertIn('reason: "reverted_by_rollback"', wh_section)
+
+        # 3. index.ts /webhooks/runpod/callback must enforce Rollback Suppression Guard and use effectiveSourceUrl
+        cb_section_match = re.search(
+            r'if \(url\.pathname === "/webhooks/runpod/callback"[\s\S]*?completedVia: "runpod_webhook_callback"',
+            self.index_ts,
+        )
+        self.assertIsNotNone(cb_section_match)
+        cb_section = cb_section_match.group(0)
+        self.assertIn("cbSnapshotEngine.getLastRollbackResult()", cb_section)
+        self.assertIn('reason: "reverted_by_rollback"', cb_section)
+        self.assertIn("const effectiveSourceUrl = resolvedPrimaryClean ? primarySrcUrl : targetSourceUrl;", cb_section)
+        self.assertIn("buildVariantCleanImageMap(cbProduct, mergedCleanedMap, resolvedPrimaryClean)", cb_section)
+
+        # 4. JSC runtime test: verify 3-variant product (Apex Snowboard) rollback echo is suppressed
+        # and out-of-order RunPod callback (v3_glacier first) does not contaminate Variant 1 with Variant 3's clean image
+        fn_norm = re.search(r"function normalizeImageUrlKey\([\s\S]*?\n\}", self.index_ts)
+        fn_collect = re.search(r"function collectUniqueProductImages\([\s\S]*?\n\}", self.index_ts)
+        fn_map = re.search(r"function getExistingCleanedUrlMap\([\s\S]*?\n\}", self.index_ts)
+        fn_lookup = re.search(r"function lookupCleanedImageUrl\([\s\S]*?\n\}", self.index_ts)
+        fn_build = re.search(r"function buildVariantCleanImageMap\([\s\S]*?\n\}", self.index_ts)
+        for m in (fn_norm, fn_collect, fn_map, fn_lookup, fn_build):
+            self.assertIsNotNone(m)
+
+        raw_ts_funcs = "\n\n".join(m.group(0) for m in (fn_norm, fn_collect, fn_map, fn_lookup, fn_build) if m)
+        js_funcs = (
+            raw_ts_funcs
+            .replace("url?: string | null", "url")
+            .replace("prod?: ProductSnapshot | null", "prod")
+            .replace("extraUrls: Array<string | undefined | null> = []", "extraUrls = []")
+            .replace("): string[] {", ") {")
+            .replace("): string {", ") {")
+            .replace("): string | undefined {", ") {")
+            .replace("): Record<string, string> {", ") {")
+            .replace("const seenNormalized = new Set<string>();", "const seenNormalized = new Set();")
+            .replace("const ordered: string[] = [];", "const ordered = [];")
+            .replace("const map: Record<string, string> = {};", "const map = {};")
+            .replace("const result: Record<string, string> = {};", "const result = {};")
+            .replace("origUrl?: string | null, cleanUrl?: string | null", "origUrl, cleanUrl")
+            .replace("cleanedImageUrls: Record<string, string>,", "cleanedImageUrls,")
+            .replace("origUrl?: string | null", "origUrl")
+            .replace("prod: ProductSnapshot,", "prod,")
+            .replace("fallbackPrimaryCleanUrl?: string", "fallbackPrimaryCleanUrl")
+        )
+
+        jsc_test = (
+            js_funcs
+            + """
+const v1Url = 'https://cdn.shopify.com/s/files/1/0840/3297/9014/files/01_apex_custom_snowboard.jpg?v=1795411216';
+const v2Url = 'https://cdn.shopify.com/s/files/1/0840/3297/9014/files/01_apex_custom_snowboard_v2_crimson.jpg?v=1795411217';
+const v3Url = 'https://cdn.shopify.com/s/files/1/0840/3297/9014/files/01_apex_custom_snowboard_v3_glacier.jpg?v=1795411217';
+
+const virginProd = {
+  productId: 'gid://shopify/Product/10349619937350',
+  productTitle: 'Apex Custom Camber All-Mountain Snowboard',
+  originalMediaList: [{ id: 'm1', url: v1Url }, { id: 'm2', url: v2Url }, { id: 'm3', url: v3Url }],
+  variants: [
+    { variantId: 'gid://shopify/ProductVariant/51129403080774', variantTitle: 'Alpine White', originalMediaId: 'm1', originalImageUrl: v1Url },
+    { variantId: 'gid://shopify/ProductVariant/51129403113542', variantTitle: 'Crimson Red', originalMediaId: 'm2', originalImageUrl: v2Url },
+    { variantId: 'gid://shopify/ProductVariant/51129403146310', variantTitle: 'Glacier Blue', originalMediaId: 'm3', originalImageUrl: v3Url }
+  ]
+};
+
+// Simulate Rollback diff record with storefrontImageUrls
+const rbDiff = {
+  productId: virginProd.productId,
+  storefrontImageUrl: v1Url,
+  storefrontImageUrls: [v1Url, v2Url, v3Url],
+  afterRevert: { storefrontImageUrl: v1Url, metafieldAction: 'PURGED_TO_VIRGIN' }
+};
+
+const uncleanedUrls = collectUniqueProductImages(virginProd);
+if (uncleanedUrls.length !== 3) throw new Error('Expected 3 unique variant images');
+
+const allowedRollbackUrls = new Set(
+  [rbDiff.storefrontImageUrl, ...(rbDiff.storefrontImageUrls || [])].map(u => normalizeImageUrlKey(u))
+);
+const allUncleanedInRollbackSet = uncleanedUrls.every(u => allowedRollbackUrls.has(normalizeImageUrlKey(u)));
+if (!allUncleanedInRollbackSet) {
+  throw new Error('Multi-variant rollback echo must be suppressed by allowedRollbackUrls');
+}
+
+// Simulate merchant uploading a genuinely new 4th promotional image after rollback
+const newUploadUrls = [...uncleanedUrls, 'https://cdn.shopify.com/s/files/1/0840/3297/9014/files/01_new_summer_sale.jpg?v=1795499999'];
+const allInSetAfterNewUpload = newUploadUrls.every(u => allowedRollbackUrls.has(normalizeImageUrlKey(u)));
+if (allInSetAfterNewUpload) {
+  throw new Error('Genuinely new image uploaded after rollback must NOT be suppressed');
+}
+
+// Simulate out-of-order RunPod callback where Variant 3 (v3Url) completes FIRST
+const cleanV3 = 'https://safemedia-shield-worker.safemedia.workers.dev/clean-media/shop/clean_10349619937350_e18bc5e4_1795411730291.jpg';
+const cleanV2 = 'https://safemedia-shield-worker.safemedia.workers.dev/clean-media/shop/clean_10349619937350_cdf8b541_1795411732780.jpg';
+const cb1Map = { ...getExistingCleanedUrlMap(virginProd), [v3Url]: cleanV3 };
+const resolvedPrimary1 = lookupCleanedImageUrl(cb1Map, v1Url);
+const effectiveSource1 = resolvedPrimary1 ? v1Url : v3Url;
+const varMap1 = buildVariantCleanImageMap(virginProd, cb1Map, resolvedPrimary1);
+
+if (varMap1['gid://shopify/ProductVariant/51129403080774']) {
+  throw new Error('Variant 1 must NOT be mapped to Variant 3 clean image when Variant 1 is still uncleaned');
+}
+
+// Now simulate callback 2 (v2Url) reading cbProduct from callback 1
+const prodAfterCb1 = {
+  ...virginProd,
+  cleanAdImageUrl: cleanV3,
+  dualFeedMetadata: {
+    sourceImageUrl: effectiveSource1,
+    shopifyImageUrl: effectiveSource1,
+    cleanedImageUrls: cb1Map,
+    variantCleanImageMap: varMap1
+  }
+};
+const cb2Existing = getExistingCleanedUrlMap(prodAfterCb1);
+if (lookupCleanedImageUrl(cb2Existing, v1Url)) {
+  throw new Error('v1Url must NOT be falsely marked as cleaned by prodAfterCb1.cleanAdImageUrl');
+}
+print('MULTI_VARIANT_ROLLBACK_AND_CALLBACK_VERIFIED');
+"""
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(jsc_test)
+            jsc_path = f.name
+        try:
+            res = subprocess.run([JSC_BIN, jsc_path], capture_output=True, text=True, timeout=5)
+            self.assertEqual(res.returncode, 0, res.stderr or res.stdout)
+            self.assertIn("MULTI_VARIANT_ROLLBACK_AND_CALLBACK_VERIFIED", res.stdout)
+        finally:
+            if os.path.exists(jsc_path):
+                os.remove(jsc_path)
+
+    def test_10_phase5_matrix_rollback_batch_and_baseline_guards(self) -> None:
+        """Verify Phase 5 State Matrix (A-1 to C-6) invariants for rollback vs. batch, full-catalog baseline, and variant media diffing."""
+        # 1. Matrix A-2-2 / A-3-2: /api/rollback must halt RUNNING batch and clear cleanedProductIds
+        self.assertIn("Matrix A-2-2 / A-3-2 Guard", self.index_ts)
+        self.assertIn("currentJob.cleanedProductIds = [];", self.index_ts)
+        # 2. Webhook initial baseline creation must fetch full store catalog instead of 1-product array
+        self.assertIn(
+            "const fullCatalog = await webhookVariantManager.fetchProductsWithVariants().catch(() => [] as ProductSnapshot[]);",
+            self.index_ts,
+        )
+        # 3. Matrix B-2-2: snapshot.ts must purge post-snapshot live products and only rebind changed variant media IDs
+        self.assertIn("const snapshotGidSet = new Set<string>", self.snapshot_ts)
+        self.assertIn("const liveVariantMediaMap =", self.snapshot_ts)
+        self.assertIn("(!liveVariantMediaMap || liveVariantMediaMap.get(v.variantId) !== v.originalMediaId)", self.snapshot_ts)
+        # 4. Phase 5 State Matrix specification file exists and is linked in SKILL.md
+        matrix_doc = read_repo_file("docs/PHASE5_STATE_MATRIX_AUDIT.md")
+        self.assertIn("A-1", matrix_doc)
+        self.assertIn("B-2", matrix_doc)
+        self.assertIn("C-6", matrix_doc)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -38,6 +38,8 @@ interface MockProductMetaState {
 interface GraphQLProductNode {
   id: string;
   title: string;
+  handle?: string;
+  status?: string;
   descriptionHtml?: string;
   media?: {
     edges?: Array<{
@@ -508,6 +510,8 @@ export class ShopifyVariantManager {
     return {
       productId: p.id,
       productTitle: p.title,
+      handle: p.handle || undefined,
+      status: p.status || undefined,
       bodyHtml: p.descriptionHtml || "",
       variants,
       originalMediaList: mediaList,
@@ -538,6 +542,8 @@ export class ShopifyVariantManager {
             node {
               id
               title
+              handle
+              status
               descriptionHtml
               cleanAdImageMetafield: metafield(namespace: "safemedia", key: "clean_ad_image_url") {
                 id
@@ -596,6 +602,7 @@ export class ShopifyVariantManager {
     const products: ProductSnapshot[] = [];
     let afterCursor: string | null = null;
     let hasNextPage = true;
+    const seenCursors = new Set<string>();
 
     while (hasNextPage && products.length < maxProducts) {
       const batchSize = Math.min(50, maxProducts - products.length);
@@ -618,8 +625,10 @@ export class ShopifyVariantManager {
       }
 
       hasNextPage = Boolean(connection?.pageInfo?.hasNextPage) && edges.length > 0;
-      afterCursor = connection?.pageInfo?.endCursor || null;
-      if (!afterCursor) break;
+      const nextCursor = connection?.pageInfo?.endCursor || null;
+      if (!nextCursor || seenCursors.has(nextCursor)) break;
+      seenCursors.add(nextCursor);
+      afterCursor = nextCursor;
     }
 
     return products;
@@ -653,6 +662,8 @@ export class ShopifyVariantManager {
         product(id: $id) {
           id
           title
+          handle
+          status
           descriptionHtml
           cleanAdImageMetafield: metafield(namespace: "safemedia", key: "clean_ad_image_url") {
             value
@@ -1655,6 +1666,8 @@ export class ShopifyVariantManager {
       {
         productId: "gid://shopify/Product/1001",
         productTitle: "プレミアム ヘビーウェイト クラシックTシャツ",
+        handle: "premium-heavyweight-classic-tee",
+        status: "ACTIVE",
         bodyHtml: "<p>最高級超長綿を使用したタフで上質なTシャツ。<img src='https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=800' /></p>",
         originalMediaList: [
           { id: "gid://shopify/MediaImage/2001", url: "https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=800", altText: "Black T-Shirt" },
@@ -1673,6 +1686,8 @@ export class ShopifyVariantManager {
       {
         productId: "gid://shopify/Product/1002",
         productTitle: "オーガニック フレンチテリー ジップアップフーディー",
+        handle: "organic-french-terry-zip-hoodie",
+        status: "ACTIVE",
         bodyHtml: "<p>通年着用できる肉厚裏毛スウェット生地のジップパーカー。</p>",
         originalMediaList: [
           { id: "gid://shopify/MediaImage/2011", url: "https://images.unsplash.com/photo-1556905055-8f358a7a47b2?w=800", altText: "Heather Grey" },

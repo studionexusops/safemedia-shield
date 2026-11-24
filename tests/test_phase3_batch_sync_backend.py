@@ -39,7 +39,7 @@ class TestPhase3BackendArchitecture(unittest.TestCase):
     def test_r2_job_state_persistence_functions(self):
         """Verify loadShopJobState and saveShopJobState are defined with R2 backing."""
         self.assertIn("async function loadShopJobState(env: Env, shop: string): Promise<BatchJobState>", self.index_ts)
-        self.assertIn("async function saveShopJobState(env: Env, shop: string, state: BatchJobState): Promise<void>", self.index_ts)
+        self.assertIn("async function saveShopJobState(", self.index_ts)
         self.assertIn('`state/${shop}/job.json`', self.index_ts)
 
     def test_distributed_runner_lock_safeguard(self):

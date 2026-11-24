@@ -1,8 +1,8 @@
 # AdFeed Clean: Google Shopping (旧称: SafeMedia Shield) - 統合システム設計書 (SYSTEM DESIGN SPECIFICATION)
 
-> **文書バージョン**: 2.6.0 (Full Variant Image AI Cleanup Architecture & Code-Doc Alignment)  
-> **最終更新日**: 2026-11-14  
-> **ステータス**: 全バリアント画像AIクリーンアップ拡張設計反映済（GraphQL 2024-10統一、I18N 116キー一元管理、二重レベルMetafield・全バリアント補助フィード同期済）  
+> **文書バージョン**: 2.6.1 (Declarative Webhooks & Fail-Safe Supplemental Feed Lifecycle)  
+> **最終更新日**: 2026-11-23  
+> **ステータス**: 全バリアント画像AIクリーンアップ拡張＋宣言的Webhook統合（`shopify.app.toml` へ `products/create`, `products/update`, `products/delete` 一元化、非ACTIVE除外、250件超全件同期、R2空上書き防止、handleベースURL生成）反映済  
 > **対象システム**: AdFeed Clean: Google Shopping (旧称: SafeMedia Shield) for Shopify (Micro-SaaS)  
 > **本番稼働URL**: `https://safemedia-shield-worker.safemedia.workers.dev` (RunPod GPU Endpoint: `cho9rydg8gsc9w`)  
 > **開発体制・ペアプログラミング**: ユーザー & Antigravity (AIエージェント)
@@ -209,19 +209,20 @@ sequenceDiagram
 
 #### 3.2.1 Shopify Webhook受信インターフェース & RunPod完了コールバック
 
-##### (1) 商品更新時自動AIクリーンアップ (`POST /webhooks/products/update` & `POST /webhooks/runpod/callback`)
+##### (1) 商品作成・更新・削除時自動AIクリーンアップ & フィード同期 (`POST /webhooks/products/create`, `POST /webhooks/products/update`, `POST /webhooks/products/delete`, `POST /webhooks/runpod/callback`)
 - **エンドポイント**:
-  - `POST /webhooks/products/update`: Shopify商品更新イベント受信
+  - `POST /webhooks/products/create` / `POST /webhooks/products/update`: Shopify商品作成・更新イベント受信（共通ハンドラ、宣言的Webhook `shopify.app.toml` により全ストアへ配信）
+  - `POST /webhooks/products/delete`: Shopify商品削除イベント受信（`autoSyncEnabled` の ON/OFF に関わらず常時稼働し、`ctx.waitUntil` で非同期に R2 補助フィードから該当商品を除外）
   - `POST /webhooks/runpod/callback`: RunPod Serverless推論完了コールバック受信（HMAC-SHA256署名 `sig` 検証付き）
-- **必須ヘッダー (`POST /webhooks/products/update`)**:
+- **必須ヘッダー (`POST /webhooks/products/*`)**:
   - `X-Shopify-Shop-Domain`: 送信元ストアドメイン（例: `store.myshopify.com`）
   - `X-Shopify-Hmac-Sha256`: ペイロードのHMAC-SHA256署名（Base64）
   - `X-Shopify-Webhook-Id`: Webhook一意識別子（べき等性照合用）
 - **処理ロジック & 防御ガード**:
-  1. **HMAC-SHA256厳格検証 & 即時200応答分離**: 生UTF-8ボディと `timingSafeEqual()` で照合（不一致は `401 Unauthorized`）。ペイロード・SSRF検証後、Workersランタイム（`ctx.waitUntil`）では外部I/O（R2・GraphQL・RunPod）を一切待たずに **即時 `200 OK`（`< 50ms`）を返却** し、後続パイプラインを完全非同期バックグラウンドで実行（Shopifyの6秒タイムアウトおよびサブスクリプション自動削除を完全回避）。
+  1. **HMAC-SHA256厳格検証 & 即時200応答分離**: 生UTF-8ボディと `timingSafeEqual()` で照合（不一致は `401 Unauthorized`）。ペイロード・SSRF検証後、Workersランタイム（`ctx.waitUntil`）では外部I/O（R2・GraphQL・RunPod）を一切待たずに **即時 `200 OK`（`< 50ms`）を返却** し、後続パイプラインを完全非同期バックグラウンドで実行（Shopifyの5秒タイムアウトおよびサブスクリプション自動削除を完全回避）。`products/delete` も同様に `ctx.waitUntil` で非同期再構築を実行し、削除済み商品への不要な Metafield 削除 API コールは行わない。
   2. **べき等性（Idempotency）チェック**: `X-Shopify-Webhook-Id` を記録（TTL 24時間）し、Shopifyの再送による同一イベントの多重実行を安全にスキップ（`200 OK`, `reason: "duplicate_webhook_id"`）。
-  3. **サーキットブレーカー & 自動同期確認**: 緊急停止作動中（`circuitBreakerTripped: true`）は最優先で `423 Locked` により新規GPU推論を安全遮断。その後、`autoSyncEnabled: false` の場合は `200 OK`（`reason: "auto_sync_disabled"`）でスキップ。
-  4. **ストアOAuthトークン解決 & 自己発火ループ防止（全バリアント画像・複数画像追加対応）**: R2の `state/${shop}/auth.json` から店舗アクセストークンを解決して商品既存メタデータと照合。親代表画像（`payload.image` / `payload.images` / GraphQL `media`）および全バリアント固有画像（`variants(first: 100)[].originalImageUrl`）から重複およびクエリパラメータ（`?v=` キャッシュバスター）の揺れを排除した `uniqueImageUrls` を構築し、`dualFeedMetadata.cleanedImageUrls`（ベースURL正規化フォールバック付き `lookupCleanedImageUrl`）と差分比較。未処理の新規・変更バリアント画像がある場合は1リクエストあたり最大6ユニーク画像（`MAX_SYNC_UNIQUE_IMAGES_PER_REQUEST = 6`）を上限に確実に処理を実行し、全ユニーク画像URLが既に処理済みの場合は即時スキップ（`already_cleaned_for_current_image`）。
+  3. **サーキットブレーカー & 自動同期確認**: 緊急停止作動中（`circuitBreakerTripped: true`）は最優先で `423 Locked` により新規GPU推論を安全遮断。その後、`autoSyncEnabled: false` の場合は `200 OK`（`reason: "auto_sync_disabled"`）で新規 AI 推論をスキップ（ただし `products/delete` によるフィード除外は常に実行）。
+  4. **ストアOAuthトークン解決 & 自己発火ループ防止（全バリアント画像・複数画像追加・ステータス追従対応）**: R2の `state/${shop}/auth.json` から店舗アクセストークンを解決して商品既存メタデータと照合。親代表画像（`payload.image` / `payload.images` / GraphQL `media`）および全バリアント固有画像（`variants(first: 100)[].originalImageUrl`）から重複およびクエリパラメータ（`?v=` キャッシュバスター）の揺れを排除した `uniqueImageUrls` を構築し、`dualFeedMetadata.cleanedImageUrls`（ベースURL正規化フォールバック付き `lookupCleanedImageUrl`）と差分比較。未処理の新規・変更バリアント画像がある場合は1リクエストあたり最大6ユニーク画像（`MAX_SYNC_UNIQUE_IMAGES_PER_REQUEST = 6`）を上限に確実に処理を実行。全ユニーク画像URLが既に処理済みの場合でも、商品の公開状態（`ACTIVE` ↔ `DRAFT` / `ARCHIVED`）やタイトル・ハンドル・バリアント構成の変化により R2 補助フィードとの差分が生じた場合は即座に `syncAdFeedToR2` で同期し、差分がなければスキップ（`already_cleaned_for_current_image`）。
   5. **Anti-TOCTOU 事前アトミック予約**: `CANARY_TRIAL` の場合、非同期GPU呼び出しの前に `canaryUsedCount += 1` を先行保存。上限到達時は `402 Payment Required`。推論失敗・SSRF遮断時は `-1` 返金。
   6. **In-Flight ロック**: `${shop}:${productId}`（TTL 60秒）で同一商品の並行GPU処理を排他制御。
   7. **RunPod 非同期推論 & Webhookコールバック分離 (`POST /webhooks/runpod/callback`)**: RunPod `/v2/{endpoint_id}/run` 呼び出し時にHMAC署名付き `webhook` URLを指定。GPUウォーム起動時はインプロセスポーリングで即時完了し、GPUコールドスタート（>18秒）時はWorker #1を安全に終了して `ctx.waitUntil` の30秒壁時計制限による強制切断を回避。GPU完了後にRunPodから呼ばれる独立リクエスト `POST /webhooks/runpod/callback`（新しい30秒実行枠）にて、HMAC署名検証・`claimWebhookCompletion` による排他制御・R2画像保存・Shopify GraphQL `metafieldsSet`（定義確認と並列実行）・`monthlyUsageCount` のインクリメントを確実に完遂する。
@@ -303,6 +304,9 @@ interface SanitizedErrorResponse {
     }>;
     canaryUsedCount: number;        // 消費済カナリア件数 (例: 1)
     canaryLimit: number;            // 上限件数 (5)
+    skipped?: boolean;              // スキップされた場合 true
+    skipReason?: string;            // スキップ理由コード
+    newlyCleanedCount?: number;     // 今回新規にAIクリーンアップしたユニーク画像数
     beforeImageUrl: string;         // Before画像URLエイリアス
     afterImageUrl: string;          // After画像URLエイリアス
   }
@@ -409,7 +413,8 @@ interface SanitizedErrorResponse {
     productTitle: string;
     snapshotId: string;
     revertedAt: string;
-    storefrontImageUrl: string;              // ストアフロント画像URL (Before/Afterを通じて100%不変)
+    storefrontImageUrl: string;              // ストアフロント代表画像URL (Before/Afterを通じて100%不変)
+    storefrontImageUrls?: string[];          // 親メディア＋全バリアントのストアフロント画像URL一覧 (マルチバリアントRollbackエコー抑止用)
     storefrontUnchanged: true;               // ストアフロント非破壊証明フラグ
     skipped?: boolean;                       // Shopify上で削除済み等のためスキップされた場合 true
     beforeRevert: {
@@ -502,7 +507,7 @@ interface SanitizedErrorResponse {
 - **`GET /api/billing/confirm` (エイリアス: `/billing/confirm`)**: 課金承認後のコールバック。Shopify Admin GraphQL の `getActiveSubscription()` による実照合を義務付け、クエリパラメータ単体による安易な昇格を完全に禁止。
 - **`POST /api/billing/reset`**: 開発・テスト用の課金状態リセットエンドポイント。リクエストボディで `planStatus`, `canaryUsedCount`, `trialUsedCount`, `monthlyUsageCount` 等の個別フィールドをリセット可能。管理者シークレット（`ADMIN_API_SECRET`）の一致、または `ENVIRONMENT === "test"` 時のみに制限。
 - **`POST, GET /api/admin/purge-metafields`**: 管理者・テスト用エンドポイント。指定店舗の全商品から `safemedia.clean_ad_image_url` と `dual_feed_metadata` を一括消去し、カナリア利用数（`canaryUsedCount`）を0に初期化（要 `ADMIN_API_SECRET` または店舗セッション）。
-- **`POST /api/webhooks/register` / `unregister`**: Shopify `products/update` Webhookの購読登録・解除および自動同期フラグ（`autoSyncEnabled`）の更新。
+- **`POST /api/webhooks/register` / `unregister`**: 自動同期フラグ（`autoSyncEnabled`）の有効化・無効化（宣言的Webhook `shopify.app.toml` 運用のため、旧API登録済み `PRODUCTS_UPDATE` Webhook がある場合はクリーンアップを実行）。
 - **`POST /api/auto-sync/toggle`**: Webhook自動同期フラグ（`autoSyncEnabled`）の即時トグル切り替え（※ 未課金の無料ユーザー `CANARY_TRIAL` からの呼び出しは `402 SUBSCRIPTION_REQUIRED_FOR_AUTOSYNC` で遮断し、14日間フリートライアルの契約同意を要求）。
 - **`POST /api/dual-feed/sync`**: 単一商品の即時デュアルフィードクリーンアップ実行。
   - **セキュリティ防御**:
@@ -531,7 +536,7 @@ interface SanitizedErrorResponse {
     3. 認可コード `code` をShopifyトークン交換API（`POST https://{shop}/admin/oauth/access_token`）へ送信し、恒久アクセストークン（`shpat_...`）を取得。
     4. 取得した認証情報をCloudflare R2（`state/{shop}/auth.json`）へ保管。
     5. 初期課金状態（`state/{shop}/billing.json`）を初期化。
-    6. `products/update` Webhookをストアへ自動登録。
+    6. 宣言的Webhook（`shopify.app.toml`）との二重配信を防ぐため、旧API登録済み `PRODUCTS_UPDATE` Webhook があればクリーンアップし、Metafield Definition（`PRODUCT` & `PRODUCTVARIANT`）をピン留め登録。
     7. マーチャントをShopify Admin管理画面内の埋め込みアプリURL（`https://{shop}/admin/apps/{apiKey}`）へ302リダイレクト。
 
 ##### (7) 公開リーガルページ & ブランドビジュアルアセット配信 (STEP 2 実装)
@@ -550,8 +555,8 @@ interface SanitizedErrorResponse {
   - すべてのGraphQL Admin API呼び出しにおいて、応答ヘッダーおよびペイロード内の `extensions.cost.throttleStatus` を監視。
   - レート制限（`THROTTLED` エラーまたはHTTP 429）発生時は、指数バックオフ＋ジッター（待機秒数: $2^n \times 1000\text{ms} + \text{jitter}$、最大3回）により自動再試行。
 - **商品・バリアント・メタフィールド一括取得（カーソルページネーション）**: `query getProductsWithMedia($first: Int!, $after: String)`
-  - `pageInfo { hasNextPage, endCursor }` を用いたカーソルページネーションにより、商品数が50件を超えるストアでも1,000件規模の全カタログを安全・確実に一巡。
-  - 商品タイトル、メディアURL、各バリアントの `MediaImage` 参照、および既存の `clean_ad_image_url` / `dual_feed_metadata` メタフィールドを一括取得。
+  - `pageInfo { hasNextPage, endCursor }` を用いたカーソルページネーションにより、商品数が50件を超えるストアでも全カタログを漏れなく一巡（補助フィード同期時は250件上限を設けず `Number.MAX_SAFE_INTEGER` で全件取得）。
+  - 商品タイトル、`handle`、公開ステータス（`status`: `ACTIVE` / `DRAFT` / `ARCHIVED`）、メディアURL、各バリアントの `MediaImage` 参照、および既存の `clean_ad_image_url` / `dual_feed_metadata` メタフィールドを一括取得。
 - **Metafield Definition 登録（Admin可視化＆広告フィード連携用）**: `mutation metafieldDefinitionCreate`
   - Shopify Admin商品管理画面およびGoogle & YouTube / Facebook & Instagram チャネル等のフィードマッピング画面から `safemedia.clean_ad_image_url`（型: `url`, `ownerType: PRODUCT` および `PRODUCTVARIANT`, `pin: true`）を直接参照・選択可能にする定義を自動作成。
 - **隠しメタフィールド格納**: `mutation metafieldsSet`
@@ -563,7 +568,7 @@ interface SanitizedErrorResponse {
 - **サブスクリプション作成**: `mutation appSubscriptionCreate`
   - 14日無料トライアル付き月額$65の定期課金チャージを作成。
   - `test` 引数は環境変数（`BILLING_TEST_MODE === "true"`）で動的制御し、本番マーチャント環境では `test: false` を強制。
-- **Webhook自動登録**: `mutation webhookSubscriptionCreate` (Topic: `PRODUCTS_UPDATE`)
+- **宣言的 Webhook 管理**: `shopify.app.toml`（`[[webhooks.subscriptions]]`）により `app/uninstalled`, `products/create`, `products/update`, `products/delete` および GDPR コンプライアンス Webhook を一元管理（旧API登録分を解除するクリーンアップ用 `mutation webhookSubscriptionDelete` を維持）。
 
 ### 3.3 ストレージ & データモデル設計 (Cloudflare R2)
 バケット名: `safemedia-snapshots`
@@ -618,6 +623,8 @@ interface SnapshotSummary {
 interface ProductSnapshot {
   productId: string;                        // 例: "gid://shopify/Product/12345678"
   productTitle: string;
+  handle?: string;                          // オンラインストアURLスラッグ (例: "classic-tee")
+  status?: string;                          // 商品公開ステータス ("ACTIVE" | "DRAFT" | "ARCHIVED")
   bodyHtml: string;
   variants: Array<{
     variantId: string;
@@ -745,7 +752,7 @@ interface DualFeedSyncResult {
 ### 3.4 Shopify隠しメタフィールド (Metafield) 仕様 & 広告補助フィード配信マッピング設計 (審査要件 4.5.3)
 ストアフロントのLiquidテーマ（商品ページのメイン画像 `product.featured_media`）には一切変更を加えず、Google Shopping（Google Merchant Center）やMeta広告カタログ（Facebook & Instagram）のフィード属性へクリーン画像を分離配信するデュアルフィード・ルーティング設計です。
 
-Shopify公式アプリ（Google & YouTube / Facebook & Instagram）のメイン商品カタログと競合・重複せず、ポリシー違反対象となる画像属性のみをピンポイントで上書き（Overwrite）するため、**「Google Merchant Center ＆ Meta Commerce Manager 補助フィード（Supplemental / Supplementary Feed）」公式仕様**に完全準拠します。フィードには**「クリーン画像メタフィールドが生成・保持されている有効商品のみ」**が過不足なく出力されます。
+Shopify公式アプリ（Google & YouTube / Facebook & Instagram）のメイン商品カタログと競合・重複せず、ポリシー違反対象となる画像属性のみをピンポイントで上書き（Overwrite）するため、**「Google Merchant Center ＆ Meta Commerce Manager 補助フィード（Supplemental / Supplementary Feed）」公式仕様**に完全準拠します。フィードには**「公開中（`status === "ACTIVE"`）かつクリーン画像メタフィールドが生成・保持されている有効商品のみ」**が過不足なく出力され、商品URLはShopifyの `handle` を優先して構築されます。また、GraphQL API の一時エラー時は空配列で R2 キャッシュを上書きせず、既存の正常なフィードキャッシュを保護します（Fail-Safe Cache Protection）。
 
 | 名前空間 (Namespace) | キー (Key) | 型 (Type) | Shopify Admin ピン留め | 説明・マッピング先 |
 | :--- | :--- | :--- | :---: | :--- |
@@ -778,9 +785,9 @@ flowchart LR
 | :--- | :--- | :--- |
 | **追加・更新** | **① カナリアテスト完了** | テスト対象商品のクリーン画像メタフィールドが保存され、R2フィードに対象商品が即座に追加・同期される。 |
 | **追加・更新** | **② カタログ一括同期完了** | 処理された全商品のクリーン画像メタフィールドが反映され、R2フィードに全クリーン商品が一覧化される。 |
-| **追加・更新** | **③ 新規画像登録 / 更新 Webhook (`products/update`)** | セール帯画像が検出・AIクリーン化された商品がR2フィードへ自動追加・最新画像URLへ更新される。 |
-| **変更・除外** | **④ 画像差し替え Webhook (`products/update`)** | セール終了等で通常画像に戻りクリーン画像不要となった商品は、メタフィールド消去とともにR2フィードから自動除外される。 |
-| **削除・除外** | **⑤ 商品削除 Webhook (`products/delete`)** | 削除された商品は即座にR2フィードから除外され、広告のリンク切れ（404）ペナルティを未然に防止する。 |
+| **追加・更新** | **③ 商品新規作成・更新 Webhook (`products/create`, `products/update`)** | セール帯画像が検出・AIクリーン化された商品がR2フィードへ自動追加・最新画像URLへ更新される。 |
+| **変更・除外** | **④ 画像差し替え・非公開化 Webhook (`products/update`)** | セール終了等で通常画像に戻りクリーン画像不要となった商品、または `DRAFT` / `ARCHIVED` へ変更された商品は、R2フィードから自動除外される。 |
+| **削除・除外** | **⑤ 商品削除 Webhook (`products/delete`)** | `autoSyncEnabled` の状態に関わらず常時受信し、削除された商品は非同期（`ctx.waitUntil`）で即座にR2フィードから除外され、広告のリンク切れ（404）ペナルティを未然に防止する。 |
 | **復元・同期** | **⑥ 1クリック・ロールバック (リストア実行)** | 復元対象のスナップショット時点のメタフィールド状態に基づき、R2フィードが過去時点の状態へ完全同期復元される。 |
 | **初期化** | **⑦ 管理パージ (メタフィールド全消去)** | 全商品のクリーン画像メタフィールドがクリアされ、R2フィードも即座に0件（空フィード）にリセットされる。 |
 
@@ -1128,12 +1135,14 @@ Cloudflare Workersで動作するAPIゲートウェイは、ゼロトラスト�
 #### 7. In-Flight重複ロック & 自己発火ループ防止
 - **重複実行ロック**: 同一ストア・同一商品IDに対する同時処理をキー `${shop}:${productId}`（TTL 60秒）のインメモリロックで制御し、同一商品への重複GPU課金を防ぎます。
 - **Webhook自己発火ループ防止**: メタフィールド（`safemedia.clean_ad_image_url`）更新時にShopifyが再度 `products/update` Webhookを発火する際、商品の `shopifyImageUrl` と既存クリーン画像の整合性を照合し、同一画像に対する再推論を自動スキップ（`skipped: true, reason: "already_cleaned_for_current_image"`）。無駄なGPUコストを0円に抑えます。
-- **1-Clickリストア（Rollback）エコー抑止ガード**:
-  - マーチャントが1-Click Rollbackを実行（`POST /api/rollback`）すると、Shopify側でバリアント再バインドおよびメタフィールド消去（`PURGED_TO_VIRGIN`）が行われ、Shopifyから `products/update` Webhookが非同期発火します。
-  - リストア実行開始時に `LAST_ROLLBACK_STORE` および R2 `state/${shop}/last_rollback.json` にロールバック状態を先行記録し、Webhookハンドラ側で以下の条件を満たす場合は `skipped: true, reason: "reverted_by_rollback"` として即時200返却します：
-    1. ロールバック対象商品かつ同一画像URLであり、復元から120秒以内のWebhookエコーである場合
-    2. 初期状態（バージン）に復元された商品で画像URLに変更がない場合（後日の在庫・説明文変更による再推論・メタフィールド再書き戻しを永久防止）
-  - これにより、リストア起因による**Monthly Usageの誤インクリメント**、**不要なRunPod GPU推論コスト**、および**クリーン画像の意図しない再書き戻し**を恒久的に防ぎます。マーチャントが新しい別画像をアップロードした際、または管理画面から明示的にカナリアテスト・バッチ最適化を実行した際は抑止が自動解除され通常処理されます。
+- **1-Clickリストア（Rollback）エコー抑止ガード（マルチバリアント対応 ＆ RunPodコールバック抑止）**:
+  - マーチャントが1-Click Rollbackを実行（`POST /api/rollback`）すると、Shopify側でバリアント再バインドおよびメタフィールド消去（`PURGED_TO_VIRGIN`）が行われ、Shopifyから `products/update` Webhookが複数商品同時に非同期発火します。
+  - リストア実行開始時に `LAST_ROLLBACK_STORE` および R2 `state/${shop}/last_rollback.json` に親メディア＋全バリアントの元画像URL一覧（`storefrontImageUrls`）を含むロールバック状態を先行記録します。
+  - `/webhooks/products/update` ハンドラでは、**GPUスロット（`acquireGpuSlot`）を取得する前**にロールバック抑止判定を実行し、以下の条件を満たす場合はGPUスロットを消費せず `skipped: true, reason: "reverted_by_rollback"` として即時200返却（およびWebhook ID処理済み記録）します：
+    1. ロールバック実行中（`Rollback in progress...`）または復元から120秒以内のWebhookエコー（`isRecentRollback`）であり、かつ画像URL（親＋全バリアント画像の正規化URLセット）に新規画像が含まれない場合
+    2. 初期状態（`PURGED_TO_VIRGIN`）に復元された商品で、親画像および全バリアントの画像URLセット（`?v=` クエリを除いた正規化URL）に変更がない場合（複数バリアント専用画像を持つ商品を含め、後日の在庫・説明文変更やリストアエコーによる再推論・メタフィールド再書き戻しを永久防止）
+  - さらに、非同期の **`POST /webhooks/runpod/callback`** においても `lastRollback` を検証し、対象商品がロールバックにより `PURGED_TO_VIRGIN` 状態（かつ `clearedAfterRollback` でない）またはコールバック到着より後にロールバックが実行された場合は、メタフィールド書き込み（`setCleanAdImageMetafield`）およびR2 XMLフィード同期（`syncAdFeedToR2`）をスキップ（クォータ予約枠の返還およびロック解放のみ実施）します。
+  - これにより、リストア起因による**Monthly Usage / Trial Quotaの誤インクリメント**、**不要なRunPod GPU推論コスト**、および**マルチバリアント商品でのクリーン画像・XMLフィードの意図しない再書き戻し**を恒久的に防ぎます。マーチャントが新しい別画像をアップロードした際、または管理画面から明示的にカナリアテスト・バッチ最適化を実行した際は抑止が自動解除され通常処理されます。
 
 #### 8. 緊急サーキットブレーカー (Emergency Stop & Clean Resume)
 - 万一の異常時、マーチャントが「Emergency Stop」を実行すると `POST /api/batch/abort` により R2 の `billingState.circuitBreakerTripped` が `true` に更新。
@@ -1434,8 +1443,9 @@ npx wrangler deploy
 ### 6.3 Shopifyパートナーダッシュボード設定・アプリ公開チェックリスト
 1. **アプリ作成**: Shopify PartnersにてAppを作成。
 2. **APIアクセススコープ設定**: `read_products`, `write_products`
-3. **Webhookエンドポイント自動登録**:
-   - ダッシュボードの Zone 1「`Toggle Auto-Sync`」または「`Enable Auto-Sync`」ボタン（`POST /api/webhooks/register`）により `PRODUCTS_UPDATE` Webhook（本番登録済ID: `gid://shopify/WebhookSubscription/2092489310405`）をワンクリック登録。
+3. **宣言的 Webhook デプロイ (`shopify.app.toml`)**:
+   - `shopify.app.toml` に `app/uninstalled`, `products/create`, `products/update`, `products/delete`, および GDPR コンプライアンス Webhook を宣言的に定義し、`shopify app deploy` により全ストアへ一括反映。
+   - ダッシュボードの Zone 1「`Toggle Auto-Sync`」または「`Enable Auto-Sync`」ボタン（`POST /api/webhooks/register` / `POST /api/auto-sync/toggle`）では、`autoSyncEnabled` フラグを制御する。
 4. **Billing API設定**:
    - プラン名: `AdFeed Clean Pro: Unlimited AI Ad-Feed Cleanup (AdFeed Clean for Google Shopping / 開発コードネーム: AdFeed Clean: Google Ad Shield)`
    - 価格: `$65.00 USD` / 30日（14日間無料トライアル付き）

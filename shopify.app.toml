@@ -25,5 +25,17 @@ topics = ["app/uninstalled"]
 uri = "https://safemedia-shield-worker.safemedia.workers.dev/webhooks/app/uninstalled"
 
 [[webhooks.subscriptions]]
+topics = ["products/create"]
+uri = "https://safemedia-shield-worker.safemedia.workers.dev/webhooks/products/create"
+
+[[webhooks.subscriptions]]
+topics = ["products/update"]
+uri = "https://safemedia-shield-worker.safemedia.workers.dev/webhooks/products/update"
+
+[[webhooks.subscriptions]]
+topics = ["products/delete"]
+uri = "https://safemedia-shield-worker.safemedia.workers.dev/webhooks/products/delete"
+
+[[webhooks.subscriptions]]
 compliance_topics = ["customers/data_request", "customers/redact", "shop/redact"]
 uri = "https://safemedia-shield-worker.safemedia.workers.dev/webhooks/compliance"

@@ -39,18 +39,41 @@ function isProductNotFoundError(err: unknown): boolean {
   );
 }
 
+function collectStorefrontImageUrls(
+  p?: ProductSnapshot,
+  liveProd?: ProductSnapshot
+): string[] {
+  const seen = new Set<string>();
+  const add = (url?: string) => {
+    const trimmed = typeof url === "string" ? url.trim() : "";
+    if (trimmed) seen.add(trimmed);
+  };
+  for (const prod of [liveProd, p]) {
+    if (!prod) continue;
+    for (const m of prod.originalMediaList || []) {
+      add(m.url);
+    }
+    for (const v of prod.variants || []) {
+      add(v.originalImageUrl);
+    }
+  }
+  return Array.from(seen);
+}
+
 function buildSkippedProductDiff(
   p: ProductSnapshot,
   snapshotId: string,
   revertedAt: string
 ): RollbackProductDataDiff {
   const storefrontImageUrl = p.originalMediaList[0]?.url || "";
+  const storefrontImageUrls = collectStorefrontImageUrls(p);
   return {
     productId: p.productId,
     productTitle: p.productTitle,
     snapshotId,
     revertedAt,
     storefrontImageUrl,
+    storefrontImageUrls,
     storefrontUnchanged: true,
     skipped: true,
     beforeRevert: {
@@ -617,7 +640,31 @@ export class SnapshotEngine {
     const canDetectDeletedFromLiveList = liveFetchSucceeded && liveProductsBefore.length < 250;
 
     let restoredCount = 0;
-    const products = Object.values(targetSnapshot.products);
+    const products: ProductSnapshot[] = [...Object.values(targetSnapshot.products)];
+    const snapshotGidSet = new Set<string>(products.map((p) => normalizeProductGid(p.productId)));
+
+    // Matrix B-2-2 Guard: Include any live products added after targetSnapshot was captured that
+    // currently carry safemedia metafields (parent or variant) so rolling back to Virgin Baseline
+    // or an earlier snapshot purges their post-snapshot clean metafields as well.
+    for (const lp of liveProductsBefore) {
+      const normGid = normalizeProductGid(lp.productId);
+      if (!snapshotGidSet.has(normGid)) {
+        const lpVarMap = buildProductVariantCleanMap(lp);
+        if (lp.cleanAdImageUrl || Object.keys(lpVarMap).length > 0) {
+          snapshotGidSet.add(normGid);
+          products.push({
+            ...lp,
+            cleanAdImageUrl: undefined,
+            dualFeedMetadata: undefined,
+            variants: (lp.variants || []).map((v) => ({
+              ...v,
+              cleanAdImageUrl: undefined,
+            })),
+          });
+        }
+      }
+    }
+
     const revertedAt = new Date().toISOString();
     const productDataDiffs: RollbackProductDataDiff[] = [];
 
@@ -637,6 +684,7 @@ export class SnapshotEngine {
         }
         const storefrontImageUrl =
           liveProd?.originalMediaList[0]?.url || p.originalMediaList[0]?.url || "";
+        const storefrontImageUrls = collectStorefrontImageUrls(p, liveProd);
         const beforeVariantMap = buildProductVariantCleanMap(liveProd);
         const afterVariantMap = buildProductVariantCleanMap(p);
         return {
@@ -645,6 +693,7 @@ export class SnapshotEngine {
           snapshotId: targetSnapshot.snapshotId,
           revertedAt,
           storefrontImageUrl,
+          storefrontImageUrls,
           storefrontUnchanged: true,
           beforeRevert: {
             storefrontImageUrl,
@@ -825,6 +874,10 @@ export class SnapshotEngine {
         liveProd && liveProd.variants.length < 100
           ? new Set(liveProd.variants.map((v) => v.variantId))
           : null;
+      const liveVariantMediaMap =
+        liveProd
+          ? new Map(liveProd.variants.map((v) => [v.variantId, v.originalMediaId || ""]))
+          : null;
       const liveMediaIdSet =
         liveProd && liveProd.originalMediaList.length < mediaFetchLimit
           ? new Set(liveProd.originalMediaList.map((m) => m.id))
@@ -832,13 +885,14 @@ export class SnapshotEngine {
       const effectiveVariantCount = liveProd ? liveProd.variants.length : p.variants.length;
 
       try {
-        // 2. Re-map each surviving variant to its surviving original media ID
+        // 2. Re-map each surviving variant whose media binding actually differs from the snapshot
         const revertUpdates = p.variants
           .filter(
             (v) =>
               Boolean(v.originalMediaId) &&
               (!liveVariantIdSet || liveVariantIdSet.has(v.variantId)) &&
-              (!liveMediaIdSet || liveMediaIdSet.has(v.originalMediaId))
+              (!liveMediaIdSet || liveMediaIdSet.has(v.originalMediaId)) &&
+              (!liveVariantMediaMap || liveVariantMediaMap.get(v.variantId) !== v.originalMediaId)
           )
           .map((v) => ({
             variantId: v.variantId,
@@ -924,12 +978,14 @@ export class SnapshotEngine {
           metafieldAction = "PURGED_TO_VIRGIN";
         }
 
+        const storefrontImageUrls = collectStorefrontImageUrls(p, liveProd);
         return {
           productId: p.productId,
           productTitle: p.productTitle,
           snapshotId: targetSnapshot.snapshotId,
           revertedAt,
           storefrontImageUrl,
+          storefrontImageUrls,
           storefrontUnchanged: true,
           beforeRevert: {
             storefrontImageUrl,

@@ -182,7 +182,7 @@ class TestCodeToDocDrift(unittest.TestCase):
 
         for method, path in additional_endpoints:
             pattern = re.compile(
-                rf'url\.pathname\s*===\s*"{re.escape(path)}"\s*&&\s*request\.method\s*===\s*"{method}"'
+                rf'(?:url\.pathname\s*===\s*"{re.escape(path)}"|\([^\n]*url\.pathname\s*===\s*"{re.escape(path)}"[^\n]*\))\s*&&\s*request\.method\s*===\s*"{method}"'
             )
             match = pattern.search(self.index_content)
             self.assertIsNotNone(
