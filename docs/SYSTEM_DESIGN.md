@@ -1032,31 +1032,38 @@ Shopify App Review 要件 `4.5.3`（エンドツーエンドのアプリ機能�
 
 ```mermaid
 flowchart TD
-    IMG["元画像 (RGB)"] --> OCR["1. Florence-2-base (<OCR_WITH_REGION>)<br>直接テンソル変換 & テキストポリゴン検出"]
-    IMG --> BANNER["2. 全幅バナーストリップ検出<br>左右エッジ色差解析 & 背景分離"]
-    OCR --> MASK1["テキスト境界ポリゴン"]
-    BANNER --> MASK2["バナー領域マスク"]
-    MASK1 --> MORPH["3. モルフォロジー文字ストローク分離<br>(MORPH_OPEN / MORPH_CLOSE)"]
-    MORPH --> COMBINE["マスク統合 (テキスト + バナー)"]
-    MASK2 --> COMBINE
-    COMBINE --> DILATE["4. マスク拡張 (Dilate 6px)"]
-    DILATE --> LAMA["5. Big-LaMa Inpainting<br>(Fast Fourier Convolution / 512pxマルチスケール)"]
+    IMG["元画像 (RGB)"] --> OCR["1. Florence-2-base (<OCR_WITH_REGION>)<br>テキスト座標 & ラベル文字列検出"]
+    IMG --> BG["2. ロバスト背景色推定<br>(左右端ヒストグラム最頻値)"]
+    OCR --> CLASSIFY{"3. プロモ/透かし vs 商品文字分類<br>(キーワード & ノイズフィルタ)"}
+    CLASSIFY -->|プロモ/透かし| BANNER["4a. 全幅バナー帯 & 枠線/影拡張検出"]
+    CLASSIFY -->|プロモ/透かし| BADGE["4b. セールバッジ領域成長セグメンテーション<br>(外枠・ドロップシャドウ完全包含)"]
+    CLASSIFY -->|プロモ/透かし| STROKE["4c. モルフォロジー文字ストローク分離"]
+    CLASSIFY -->|商品ロゴ・装飾文字| PROTECT["商品本体シルエット保護<br>(原則マスク除外)"]
+    BG --> BANNER
+    BG --> BADGE
+    BG --> PROTECT
+    BANNER --> COMBINE["マスク統合 & Dilate (6px)"]
+    BADGE --> COMBINE
+    STROKE --> COMBINE
+    COMBINE --> LAMA["5. Big-LaMa Inpainting<br>(Fast Fourier Convolution / 512pxマルチスケール)"]
     IMG --> LAMA
     LAMA --> BLEND["6. ガウシアンフェザー合成 (7px)<br>非マスク領域のロスレス完全保持"]
     BLEND --> OUT["クリーン広告画像 (JPEG 95)"]
 ```
 
 #### 推論エンジンのコア技術詳細:
-1. **Florence-2 テキスト・透かし検出（直接テンソル構築方式）**:
-   - `microsoft/Florence-2-base` を採用。CUDA環境での `flash_attn` 依存回避パッチ（`fixed_get_imports`）に加え、`BatchFeature.convert_to_tensors` を介さず `768x768 BICUBIC` 正規化配列から直接 `torch.from_numpy` で `pixel_values` テンソルを構築することで、環境差異によるテンソル変換エラーを根絶。
-2. **全幅セール帯（Banner Strip）自動判定アルゴリズム**:
-   - 画像の左右端ピクセルの色平均と背景色を統計比較し、商品画像の上端/下端を横断するセールバナーを高精度に自動検出。
-3. **モルフォロジー文字ストローク分離**:
-   - `cv2.morphologyEx` の楕円カーネルを用い、商品本体のディテールを壊さずにテキスト文字のストロークのみを分離。
-4. **Big-LaMa Inpainting (Fast Fourier Convolution)**:
-   - TorchScript形式（`big-lama.pt`）で軽量ロード。周波数領域での広域畳み込み（FFC）により、大きな文字や帯が消えた跡も自然な商品テクスチャ・背景で補完。
-5. **フェザーブレンディング**:
-   - マスク境界をガウシアンフィルタ（7px）でぼかして合成。推論対象外のピクセルは1ビットの劣化もなく元画像を100%維持。
+1. **Florence-2 テキスト・透かし検出 & セマンティック分類**:
+   - `microsoft/Florence-2-base` (`<OCR_WITH_REGION>`) を採用。座標（`quad_boxes`）だけでなく認識文字列（`labels`）を抽出し、セール・割引・透かしキーワード（`SALE`, `% OFF`, `FREE SHIPPING`, `CLEARANCE`, `©` 等）と商品本体に印刷されたブランド名・モデル表記（例: `SOLARIS`, `AEROX`, `SMITH`, `GORE-TEX`）を厳格に分離。
+   - 商品本体シルエット内部の非プロモ文字はマスクから除外し、商品上の文字や装飾を100%保護。
+2. **ロバスト背景色推定 & 全幅セール帯（Banner Strip）境界完全除去**:
+   - 画像左右端のピクセル量子化ヒストグラムからストア背景色を推定するため、画像最上端（`y=0`）に配置されたセール帯でも正確に検出可能。
+   - 帯の上下に付与された枠線（金色・黄色ライン等）やドロップシャドウを背景色に戻るまで外側へ自動拡張して包含し、帯のフチ残りを根絶。また周辺減光（ビネット）による誤爆を抑制。
+3. **セールバッジ・ステッカー領域成長セグメンテーション**:
+   - 円形・角丸・リボン型などのセールバッジに対して、プロモテキスト周囲の色から連結成分を領域成長（安全面積上限 20% ガード付き）させ、内側の文字・二重線の穴埋めおよび外側の白枠・ドロップシャドウまで一括マスク化。
+4. **モルフォロジー文字ストローク分離**:
+   - 背景上に直接配置された透かし文字に対して `cv2.morphologyEx` の楕円カーネルを用い、商品ディテールを壊さずにストロークのみを分離。
+5. **Big-LaMa Inpainting & フェザーブレンディング**:
+   - TorchScript形式（`big-lama.pt`）による広域畳み込み補完（FFC）後、マスク境界をガウシアンフィルタ（7px）で合成。推論対象外の商品ピクセルは1ビットの劣化もなく元画像を100%維持。
 
 ### 4.2 バリアント完全保護レイヤー (Variant Mapping Preserve)
 実装ファイル: [cloudflare_worker/src/shopify.ts](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts)
@@ -1363,7 +1370,7 @@ OK
 | **R3.1** | マーチャント導入から運用・緊急停止・復元に至るライフサイクルE2E完走 | `TestTier4RealWorldLifecycle` (7 Lifecycle Tests) | **PASS** |
 
 ### 5.2 AI推論精度・GPU処理速度・原価ベンチマーク実績
-検証スクリプト: [verify_inpainting_pipeline.py](file:///Users/yusuke/antigravity/Micro-SaaS/verify_inpainting_pipeline.py), [test_runpod_live_e2e.py](file:///Users/yusuke/antigravity/Micro-SaaS/test_runpod_live_e2e.py)
+検証スクリプト: [scripts/verify_inpainting_pipeline.py](file:///Users/yusuke/antigravity/Micro-SaaS/scripts/verify_inpainting_pipeline.py), [scripts/test_runpod_live_e2e.py](file:///Users/yusuke/antigravity/Micro-SaaS/scripts/test_runpod_live_e2e.py)
 
 1. **ローカル15枚ベンチマーク（PSNR画質改善）**:
    - Lv1（四隅透かし）: `39.2 dB ➔ 60.4 dB`（**+21.2 dB 改善**）
@@ -1499,7 +1506,7 @@ npx wrangler deploy
 - [tests/empirical_dom_challenger_m2.py](file:///Users/yusuke/antigravity/Micro-SaaS/tests/empirical_dom_challenger_m2.py): DOMツリー階層・2-Zone・5層カード構造実証チャレンジャー (13テスト)
 - [tests/test_m2_bilingual_parity.py](file:///Users/yusuke/antigravity/Micro-SaaS/tests/test_m2_bilingual_parity.py): 日英バイリンガル116キー完全対称性テスト (15テスト)
 - [cloudflare_worker/test_e2e_simulation.py](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/test_e2e_simulation.py): インメモリシミュレータによるWorkers総合ライフサイクル検証 (5テスト)
-- [test_runpod_live_e2e.py](file:///Users/yusuke/antigravity/Micro-SaaS/test_runpod_live_e2e.py): 完全クラウド間（Workers ➔ RunPod GPU ➔ R2 ➔ Shopify Metafield）実機検証スクリプト
-- [test_security_and_priority4.py](file:///Users/yusuke/antigravity/Micro-SaaS/test_security_and_priority4.py): セキュリティ・異常系・マルチテナント分離・5件無料枠＆課金ゲート自動検証スイート
+- [scripts/test_runpod_live_e2e.py](file:///Users/yusuke/antigravity/Micro-SaaS/scripts/test_runpod_live_e2e.py): 完全クラウド間（Workers ➔ RunPod GPU ➔ R2 ➔ Shopify Metafield）実機検証スクリプト
+- [scripts/test_security_and_priority4.py](file:///Users/yusuke/antigravity/Micro-SaaS/scripts/test_security_and_priority4.py): セキュリティ・異常系・マルチテナント分離・5件無料枠＆課金ゲート自動検証スイート
 - [GEMINI.md](file:///Users/yusuke/antigravity/Micro-SaaS/GEMINI.md): プロジェクト全体ルール・キルスイッチ基準
 
