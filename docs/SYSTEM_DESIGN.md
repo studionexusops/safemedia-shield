@@ -1363,7 +1363,7 @@ OK
 | **R3.1** | マーチャント導入から運用・緊急停止・復元に至るライフサイクルE2E完走 | `TestTier4RealWorldLifecycle` (7 Lifecycle Tests) | **PASS** |
 
 ### 5.2 AI推論精度・GPU処理速度・原価ベンチマーク実績
-検証スクリプト: [verify_inpainting_pipeline.py](file:///Users/yusuke/antigravity/Micro-SaaS/verify_inpainting_pipeline.py), [test_runpod_live_e2e.py](file:///Users/yusuke/antigravity/Micro-SaaS/test_runpod_live_e2e.py)
+検証スクリプト: [scripts/verify_inpainting_pipeline.py](file:///Users/yusuke/antigravity/Micro-SaaS/scripts/verify_inpainting_pipeline.py), [scripts/test_runpod_live_e2e.py](file:///Users/yusuke/antigravity/Micro-SaaS/scripts/test_runpod_live_e2e.py)
 
 1. **ローカル15枚ベンチマーク（PSNR画質改善）**:
    - Lv1（四隅透かし）: `39.2 dB ➔ 60.4 dB`（**+21.2 dB 改善**）
@@ -1499,7 +1499,7 @@ npx wrangler deploy
 - [tests/empirical_dom_challenger_m2.py](file:///Users/yusuke/antigravity/Micro-SaaS/tests/empirical_dom_challenger_m2.py): DOMツリー階層・2-Zone・5層カード構造実証チャレンジャー (13テスト)
 - [tests/test_m2_bilingual_parity.py](file:///Users/yusuke/antigravity/Micro-SaaS/tests/test_m2_bilingual_parity.py): 日英バイリンガル116キー完全対称性テスト (15テスト)
 - [cloudflare_worker/test_e2e_simulation.py](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/test_e2e_simulation.py): インメモリシミュレータによるWorkers総合ライフサイクル検証 (5テスト)
-- [test_runpod_live_e2e.py](file:///Users/yusuke/antigravity/Micro-SaaS/test_runpod_live_e2e.py): 完全クラウド間（Workers ➔ RunPod GPU ➔ R2 ➔ Shopify Metafield）実機検証スクリプト
-- [test_security_and_priority4.py](file:///Users/yusuke/antigravity/Micro-SaaS/test_security_and_priority4.py): セキュリティ・異常系・マルチテナント分離・5件無料枠＆課金ゲート自動検証スイート
+- [scripts/test_runpod_live_e2e.py](file:///Users/yusuke/antigravity/Micro-SaaS/scripts/test_runpod_live_e2e.py): 完全クラウド間（Workers ➔ RunPod GPU ➔ R2 ➔ Shopify Metafield）実機検証スクリプト
+- [scripts/test_security_and_priority4.py](file:///Users/yusuke/antigravity/Micro-SaaS/scripts/test_security_and_priority4.py): セキュリティ・異常系・マルチテナント分離・5件無料枠＆課金ゲート自動検証スイート
 - [GEMINI.md](file:///Users/yusuke/antigravity/Micro-SaaS/GEMINI.md): プロジェクト全体ルール・キルスイッチ基準
 

@@ -26,7 +26,7 @@ PythonによるAI推論パイプライン（RunPod Serverless）および TypeSc
    - Shopifyの商品メタフィールド（`custom.clean_ad_image`）への書き込みはトランザクション安全に行う。
 3. **再現性と可読性**:
    - 型定義（TypeScript types / Pydantic）を厳格に付与する。
-   - 既存のテストコード（`test_security_and_priority4.py`, `verify_inpainting_pipeline.py` 等）を壊さないこと。
+   - 既存のテストコード（`scripts/test_security_and_priority4.py`, `scripts/verify_inpainting_pipeline.py` 等）を壊さないこと。
 
 ---
 

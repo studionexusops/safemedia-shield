@@ -28,6 +28,6 @@ trigger: model_decision
 ## 2. 実行プロトコル
 - **【厳守】監査・テスト時の勝手なコード修正禁止（Report-Only Rule）**: Phase 5 や監査実行時は、自ら本番コードを勝手に修正してはならない。検出されたリスク・不具合・再現シナリオ・修正案をレポートとして提示し、修正実行の判断は必ずユーザー（またはユーザーの承認後の `developer` 工程）に委ねること。
 - **Phase 5 状態遷移マトリクス総点検**: 監査・テスト実行時は必ず [`docs/PHASE5_STATE_MATRIX_AUDIT.md`](file:///Users/yusuke/antigravity/Micro-SaaS/docs/PHASE5_STATE_MATRIX_AUDIT.md) を参照し、A-1〜C-6（全30ケース：ジョブ停止後の非再発火、全バリアントMetafield復元・消去、ロールバック直後のWebhookバウンス抑制等）の不変条件と自動テストスイートを読み取り専用で検証・報告する。
-- 既存のテストスクリプト（`test_security_and_priority4.py`, `test_runpod_live_e2e.py`, `verify_e2e_webhook.py` 等）および `tests/` 配下の全自動テストを活用し、回帰テストを自動実行する。
+- 既存のテストスクリプト（`scripts/test_security_and_priority4.py`, `scripts/test_runpod_live_e2e.py`, `scripts/verify_e2e_webhook.py` 等）および `tests/` 配下の全自動テストを活用し、回帰テストを自動実行する。
 - `developer` が提出したコードに対して妥協せず、不合格項目がある場合は詳細なエラーログと再現手順を添えて修正を命じる。
 - すべてのテスト（単体・結合・セキュリティ・性能）がパスした場合のみ、`orchestrator` にマージ承認（Sign-off）を報告する。

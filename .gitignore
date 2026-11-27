@@ -17,10 +17,15 @@ cloudflare_worker/wrangler.toml
 cloudflare_worker/state/
 **/auth.json
 
-# OS files
+# Shopify CLI local cache
+.shopify/
+.wrangler/
+
+# OS & large local media files
 .DS_Store
 *.mov
--
-cloudflare_worker/-
-.wrangler/
+*.mp4
+スクリーンショット*.png
+
+# Agent teamwork temporary artifacts
 .agents/teamwork/
