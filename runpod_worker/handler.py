@@ -20,7 +20,8 @@ import logging
 import socket
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import patch
 
 import numpy as np
@@ -86,6 +87,53 @@ def ensure_lama_model() -> str:
     if LAMA_MODEL_SHA256:
         _verify_file_sha256(LAMA_MODEL_PATH, LAMA_MODEL_SHA256)
     return LAMA_MODEL_PATH
+
+
+_PROMO_KEYWORDS_RE = re.compile(
+    r"(?:"
+    r"\b(?:sale|off|discount|clearance|outlet|deal|deals|promo|promotion|promotional|"
+    r"special|limited|offer|save|bargain|markdown|flash|hot|exclusive|bonus|gift|"
+    r"free|shipping|delivery|warranty|guarantee|authentic|bestseller|best\s*seller|"
+    r"new\s*arrival|must\s*have|today\s*only|hurry|order\s*now|shop\s*now|buy\s*now|"
+    r"winter\s*sale|summer\s*sale|spring\s*sale|autumn\s*sale|black\s*friday|cyber\s*monday|"
+    r"confidential|watermark|sample|draft|copyright|all\s*rights\s*reserved|store\s*name)\b"
+    r"|%"
+    r"|[¥$€£]\s*\d"
+    r"|\d+\s*(?:円|％|off)\b"
+    r"|©"
+    r"|(?:セール|割引|限定|特価|送料無料|クーポン|オフ|半額|無断転載)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _clean_ocr_label(raw_label: str) -> str:
+    """Normalizes Florence-2 OCR label strings by stripping special tokens and whitespace."""
+    return raw_label.replace("</s>", "").replace("<s>", "").strip()
+
+
+def _is_promo_or_watermark_text(label: str) -> bool:
+    """Returns True if the OCR text matches promotional banner, badge, price, or watermark patterns."""
+    cleaned = _clean_ocr_label(label)
+    if not cleaned:
+        return False
+    return bool(_PROMO_KEYWORDS_RE.search(cleaned))
+
+
+def _is_noise_ocr_label(label: str) -> bool:
+    """Filters out hallucinated non-ASCII/punctuation-only OCR noise on clean product textures."""
+    cleaned = _clean_ocr_label(label)
+    if not cleaned:
+        return True
+    alnum_chars = [c for c in cleaned if c.isalnum()]
+    if len(alnum_chars) == 0:
+        return "©" not in cleaned and "%" not in cleaned
+    # Filter out spurious Arabic/Indic digit hallucinations on clean graphics
+    ascii_or_cjk_alnum = sum(
+        1 for c in cleaned
+        if c.isalnum() and (ord(c) < 128 or ("\u3000" <= c <= "\u9fff") or ("\uff00" <= c <= "\uffef"))
+    )
+    return ascii_or_cjk_alnum == 0
 
 
 class SafeMediaInpaintEngine:
@@ -164,6 +212,238 @@ class SafeMediaInpaintEngine:
         )
         return parsed.get(task_prompt, {})
 
+    @staticmethod
+    def _estimate_background_color(img_np: np.ndarray) -> np.ndarray:
+        """
+        Robustly estimates the dominant store background color from the outer vertical edges
+        (excluding potential top/bottom banners by taking the dominant cluster across all rows).
+        """
+        h, w, _ = img_np.shape
+        edge_w = max(2, int(w * 0.03))
+        left_strip = img_np[:, :edge_w, :].reshape(-1, 3).astype(np.float32)
+        right_strip = img_np[:, max(0, w - edge_w):, :].reshape(-1, 3).astype(np.float32)
+        samples = np.concatenate([left_strip, right_strip], axis=0)
+        if samples.shape[0] == 0:
+            return np.array([255.0, 255.0, 255.0], dtype=np.float32)
+
+        # Quantize colors to 16-unit bins to find the dominant background mode (immune to top/bottom banners)
+        quantized = (samples // 16).astype(np.int32)
+        keys = quantized[:, 0] * 256 + quantized[:, 1] * 16 + quantized[:, 2]
+        unique_keys, counts = np.unique(keys, return_counts=True)
+        best_key = unique_keys[int(np.argmax(counts))]
+        in_mode = samples[keys == best_key]
+        return np.median(in_mode, axis=0).astype(np.float32)
+
+    @staticmethod
+    def _detect_horizontal_banners(
+        img_np: np.ndarray,
+        bg_color: np.ndarray,
+        promo_boxes: List[Tuple[int, int, int, int]],
+    ) -> np.ndarray:
+        """
+        Detects full-width horizontal sale/promotional banners (including top/bottom edge banners,
+        border lines, and drop shadows) without falsely masking the product itself.
+        """
+        h, w, _ = img_np.shape
+        banner_mask = np.zeros((h, w), dtype=np.uint8)
+        if h < 16 or w < 16:
+            return banner_mask
+
+        edge_w = max(4, int(w * 0.04))
+        left_rows = img_np[:, :edge_w, :].mean(axis=1).astype(np.float32)
+        right_rows = img_np[:, max(0, w - edge_w):, :].mean(axis=1).astype(np.float32)
+
+        # A horizontal banner spans both left and right edges with a consistent non-background color
+        edge_diff = np.linalg.norm(left_rows - right_rows, axis=1)
+        left_bg_diff = np.linalg.norm(left_rows - bg_color[None, :], axis=1)
+        right_bg_diff = np.linalg.norm(right_rows - bg_color[None, :], axis=1)
+
+        # Also check horizontal uniformity across the row (at least at 15% and 85% width) to avoid
+        # false positives on wide dark products touching both edges
+        x15 = min(w - 1, max(0, int(w * 0.15)))
+        x85 = min(w - 1, max(0, int(w * 0.85)))
+        row_uniformity = np.linalg.norm(
+            img_np[:, x15, :].astype(np.float32) - left_rows, axis=1
+        ) + np.linalg.norm(
+            img_np[:, x85, :].astype(np.float32) - right_rows, axis=1
+        )
+
+        is_banner_row = (
+            (edge_diff < 32.0)
+            & (left_bg_diff > 28.0)
+            & (right_bg_diff > 28.0)
+            & (row_uniformity < 90.0)
+        )
+
+        # Find contiguous row segments
+        segments: List[Tuple[int, int]] = []
+        in_seg = False
+        seg_start = 0
+        for y in range(h):
+            if is_banner_row[y] and not in_seg:
+                in_seg = True
+                seg_start = y
+            elif not is_banner_row[y] and in_seg:
+                in_seg = False
+                segments.append((seg_start, y - 1))
+        if in_seg:
+            segments.append((seg_start, h - 1))
+
+        max_banner_h = int(h * 0.28)
+        min_banner_h = max(6, int(h * 0.02))
+        border_scan_px = max(10, int(h * 0.018))
+
+        for sy1, sy2 in segments:
+            seg_h = sy2 - sy1 + 1
+            if seg_h < min_banner_h or seg_h > max_banner_h:
+                continue
+
+            # Confirm segment contains promotional text OR is a high-contrast colored edge strip
+            near_top_or_bottom = sy1 <= int(h * 0.25) or sy2 >= int(h * 0.75)
+            contains_promo_text = any(
+                not (by2 < sy1 - 4 or by1 > sy2 + 4)
+                for (_, by1, _, by2) in promo_boxes
+            )
+            seg_bg_diff = float(np.mean(left_bg_diff[sy1:sy2 + 1]))
+            if not (contains_promo_text or (near_top_or_bottom and seg_bg_diff > 55.0)):
+                continue
+
+            # Expand outward to capture colored border lines (gold/yellow/white) and drop shadows
+            # until the row edges return close to bg_color
+            exp_y1 = sy1
+            for _ in range(border_scan_px):
+                if exp_y1 <= 0:
+                    break
+                prev_y = exp_y1 - 1
+                if (
+                    np.linalg.norm(left_rows[prev_y] - bg_color) < 10.0
+                    and np.linalg.norm(right_rows[prev_y] - bg_color) < 10.0
+                ):
+                    break
+                exp_y1 = prev_y
+
+            exp_y2 = sy2
+            for _ in range(border_scan_px):
+                if exp_y2 >= h - 1:
+                    break
+                next_y = exp_y2 + 1
+                if (
+                    np.linalg.norm(left_rows[next_y] - bg_color) < 10.0
+                    and np.linalg.norm(right_rows[next_y] - bg_color) < 10.0
+                ):
+                    break
+                exp_y2 = next_y
+
+            # Add 3px safety margin for anti-aliased edges
+            by1 = max(0, exp_y1 - 3)
+            by2 = min(h, exp_y2 + 4)
+            banner_mask[by1:by2, :] = 255
+
+        return banner_mask
+
+    @staticmethod
+    def _estimate_foreground_mask(
+        img_np: np.ndarray, bg_color: np.ndarray, exclude_mask: np.ndarray
+    ) -> np.ndarray:
+        """
+        Estimates the main product silhouette by finding non-background regions connected
+        away from the image borders (or large central components).
+        """
+        h, w, _ = img_np.shape
+        diff = np.linalg.norm(img_np.astype(np.float32) - bg_color[None, None, :], axis=2)
+        non_bg = ((diff > 18.0) & (exclude_mask == 0)).astype(np.uint8) * 255
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        non_bg = cv2.morphologyEx(non_bg, cv2.MORPH_CLOSE, k)
+        return non_bg
+
+    @staticmethod
+    def _extract_badge_region_mask(
+        img_np: np.ndarray,
+        bg_color: np.ndarray,
+        pts: List[Tuple[float, float]],
+    ) -> Optional[np.ndarray]:
+        """
+        Attempts to segment a solid/gradient promotional badge or sticker surrounding a promo OCR box.
+        Returns a full-resolution binary mask of the entire badge (including outer border & shadow)
+        if a distinct badge background is found, or None if the text sits directly on the store background.
+        """
+        h, w, _ = img_np.shape
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        bx1 = max(0, int(min(xs)))
+        by1 = max(0, int(min(ys)))
+        bx2 = min(w, int(max(xs)))
+        by2 = min(h, int(max(ys)))
+        bw = max(1, bx2 - bx1)
+        bh = max(1, by2 - by1)
+
+        # Sample a ring around the text box to find the badge fill color
+        pad = max(6, int(min(bw, bh) * 0.35))
+        rx1 = max(0, bx1 - pad)
+        ry1 = max(0, by1 - pad)
+        rx2 = min(w, bx2 + pad)
+        ry2 = min(h, by2 + pad)
+
+        ring_mask = np.zeros((h, w), dtype=np.uint8)
+        ring_mask[ry1:ry2, rx1:rx2] = 255
+        ring_mask[by1:by2, bx1:bx2] = 0
+        ring_pixels = img_np[ring_mask > 0].astype(np.float32)
+        if ring_pixels.shape[0] < 16:
+            return None
+
+        badge_color = np.median(ring_pixels, axis=0)
+        # If surrounding ring is basically the store background, this is floating text/watermark, not a badge
+        if np.linalg.norm(badge_color - bg_color) < 28.0:
+            return None
+
+        # Work within a bounded ROI around the text box so region growing cannot leak across the whole image
+        roi_margin_x = max(bw * 2, int(w * 0.25))
+        roi_margin_y = max(bh * 3, int(h * 0.25))
+        ox1 = max(0, bx1 - roi_margin_x)
+        oy1 = max(0, by1 - roi_margin_y)
+        ox2 = min(w, bx2 + roi_margin_x)
+        oy2 = min(h, by2 + roi_margin_y)
+
+        roi = img_np[oy1:oy2, ox1:ox2].astype(np.float32)
+        color_dist = np.linalg.norm(roi - badge_color[None, None, :], axis=2)
+        similar = (color_dist < 42.0).astype(np.uint8)
+
+        # Seed from the ring pixels inside the ROI that match badge_color
+        ring_roi = ring_mask[oy1:oy2, ox1:ox2] > 0
+        seed_mask = (similar > 0) & ring_roi
+        if not np.any(seed_mask):
+            return None
+
+        num_labels, labels = cv2.connectedComponents(similar, connectivity=8)
+        seed_labels = np.unique(labels[seed_mask])
+        seed_labels = seed_labels[seed_labels > 0]
+        if seed_labels.size == 0:
+            return None
+
+        comp_mask = np.isin(labels, seed_labels).astype(np.uint8) * 255
+
+        # Fill interior holes (such as text strokes and inner white rings)
+        contours, _ = cv2.findContours(comp_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        filled_roi = np.zeros_like(comp_mask)
+        cv2.drawContours(filled_roi, contours, -1, 255, thickness=cv2.FILLED)
+
+        area_ratio = float((filled_roi > 0).sum()) / float(h * w)
+        # Safety guard: if region grew into a large product body (>20% of image), reject badge expansion
+        if area_ratio > 0.20:
+            return None
+
+        # Dilate outward to completely swallow outer badge borders (white rim) and drop shadows
+        # so LaMa only sees clean background around the mask perimeter.
+        rim_px = max(16, int(min(w, h) * 0.022))
+        rim_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (rim_px * 2 + 1, rim_px * 2 + 1))
+        filled_roi = cv2.dilate(filled_roi, rim_kernel, iterations=1)
+
+        full_badge_mask = np.zeros((h, w), dtype=np.uint8)
+        full_badge_mask[oy1:oy2, ox1:ox2] = filled_roi
+        return full_badge_mask
+
     def detect_overlay_mask(self, image: Image.Image, dilate_px: int = 6) -> np.ndarray:
         w, h = image.size
         img_np = np.array(image.convert("RGB"))
@@ -171,7 +451,39 @@ class SafeMediaInpaintEngine:
 
         ocr_res = self.run_florence_ocr(image)
         quad_boxes = ocr_res.get("quad_boxes", [])
+        raw_labels = ocr_res.get("labels", [])
 
+        bg_color = self._estimate_background_color(img_np)
+
+        # Classify OCR detections into promotional/watermark vs product-printed text
+        promo_entries: List[Tuple[List[Tuple[float, float]], Tuple[int, int, int, int], str]] = []
+        non_promo_entries: List[Tuple[List[Tuple[float, float]], Tuple[int, int, int, int], str]] = []
+
+        for idx, quad in enumerate(quad_boxes):
+            label = raw_labels[idx] if idx < len(raw_labels) else ""
+            if _is_noise_ocr_label(label):
+                continue
+            pts = [(quad[i], quad[i + 1]) for i in range(0, len(quad), 2)]
+            if len(pts) < 3:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            bbox = (int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
+
+            if _is_promo_or_watermark_text(label):
+                promo_entries.append((pts, bbox, label))
+            else:
+                non_promo_entries.append((pts, bbox, label))
+
+        # Step 1: Detect full-width horizontal banners (works even at y=0 and captures borders/shadows)
+        promo_bboxes = [b for (_, b, _) in promo_entries]
+        banner_mask = self._detect_horizontal_banners(img_np, bg_color, promo_bboxes)
+        final_mask = np.maximum(final_mask, banner_mask)
+
+        # Step 2: Estimate foreground (product) silhouette excluding already-detected banners
+        fg_mask = self._estimate_foreground_mask(img_np, bg_color, banner_mask)
+
+        # Prepare morphological stroke anomaly map for floating text/watermarks
         k_bg = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21))
         opened = cv2.morphologyEx(img_np, cv2.MORPH_OPEN, k_bg)
         closed = cv2.morphologyEx(img_np, cv2.MORPH_CLOSE, k_bg)
@@ -179,52 +491,57 @@ class SafeMediaInpaintEngine:
         diff_close = np.linalg.norm(img_np.astype(np.float32) - closed.astype(np.float32), axis=2)
         stroke_anomaly = np.maximum(diff_open, diff_close)
 
-        for quad in quad_boxes:
-            pts = [(quad[i], quad[i + 1]) for i in range(0, len(quad), 2)]
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+        # Step 3: Process promotional / watermark OCR detections (skipping ones already inside banners)
+        for pts, (bx1, by1, bx2, by2), _ in promo_entries:
+            cx = min(w - 1, max(0, (bx1 + bx2) // 2))
+            cy = min(h - 1, max(0, (by1 + by2) // 2))
+            if banner_mask[cy, cx] > 0:
+                continue
 
-            box_h = y2 - y1
-            pad_y = int(box_h * 0.45)
-            sy1 = max(0, int(y1 - pad_y))
-            sy2 = min(h, int(y2 + pad_y))
-            left_patch = img_np[sy1:sy2, :max(10, int(w * 0.05)), :]
-            right_patch = img_np[sy1:sy2, min(w - 10, int(w * 0.95)):, :]
-            top_bg = img_np[:max(5, int(h * 0.03)), :max(5, int(w * 0.03)), :]
+            # Try full badge/sticker segmentation first (e.g., circular/rectangular sale stickers)
+            badge_mask = self._extract_badge_region_mask(img_np, bg_color, pts)
+            if badge_mask is not None:
+                final_mask = np.maximum(final_mask, badge_mask)
+                continue
 
-            is_full_banner = False
-            if left_patch.size > 0 and right_patch.size > 0 and top_bg.size > 0:
-                left_mean = left_patch.mean(axis=(0, 1))
-                right_mean = right_patch.mean(axis=(0, 1))
-                bg_mean = top_bg.mean(axis=(0, 1))
-                edge_diff = np.linalg.norm(left_mean - right_mean)
-                bg_diff = np.linalg.norm(left_mean - bg_mean)
-                if edge_diff < 25.0 and bg_diff > 40.0:
-                    row_colors = img_np[:, :max(10, int(w * 0.05)), :].mean(axis=1)
-                    banner_rows = np.where(np.linalg.norm(row_colors - left_mean, axis=1) < 35.0)[0]
-                    if len(banner_rows) > 0:
-                        by1 = max(0, int(banner_rows.min()) - 4)
-                        by2 = min(h, int(banner_rows.max()) + 5)
-                        if (by2 - by1) < h * 0.25:
-                            final_mask[by1:by2, :] = 255
-                            is_full_banner = True
+            # Otherwise, remove the promotional text / floating watermark strokes
+            poly_img = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(poly_img).polygon(pts, fill=255)
+            poly_np = cv2.dilate(
+                np.array(poly_img, dtype=np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)),
+                iterations=1,
+            )
+            region_vals = stroke_anomaly[poly_np > 0]
+            if region_vals.size > 0:
+                thresh = max(14.0, float(np.percentile(region_vals, 55)))
+                stroke_mask = ((stroke_anomaly >= thresh) & (poly_np > 0)).astype(np.uint8) * 255
+                if (stroke_mask > 0).sum() < 0.08 * (poly_np > 0).sum():
+                    stroke_mask = poly_np
+                final_mask = np.maximum(final_mask, stroke_mask)
 
-            if not is_full_banner:
+        # Step 4: Protect product-printed text & graphics!
+        # Non-promotional text (brand logos like SOLARIS, AEROX, SMITH, GORE-TEX, VELOCITY)
+        # is ONLY masked if it sits completely outside the product silhouette in a corner watermark zone.
+        for pts, (bx1, by1, bx2, by2), _ in non_promo_entries:
+            cx = min(w - 1, max(0, (bx1 + bx2) // 2))
+            cy = min(h - 1, max(0, (by1 + by2) // 2))
+            if banner_mask[cy, cx] > 0:
+                continue
+
+            # Check if this text overlaps with the product foreground
+            rx1, ry1 = max(0, bx1), max(0, by1)
+            rx2, ry2 = min(w, bx2), min(h, by2)
+            if rx2 <= rx1 or ry2 <= ry1:
+                continue
+
+            fg_overlap = float((fg_mask[ry1:ry2, rx1:rx2] > 0).sum()) / float((rx2 - rx1) * (ry2 - ry1))
+            in_corner = (cx < w * 0.20 or cx > w * 0.80) and (cy < h * 0.15 or cy > h * 0.85)
+            # Only remove non-promo text if it is isolated on background in an image corner (watermark)
+            if fg_overlap < 0.15 and in_corner:
                 poly_img = Image.new("L", (w, h), 0)
                 ImageDraw.Draw(poly_img).polygon(pts, fill=255)
-                poly_np = cv2.dilate(
-                    np.array(poly_img, dtype=np.uint8),
-                    cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13)),
-                    iterations=1,
-                )
-                region_vals = stroke_anomaly[poly_np > 0]
-                if region_vals.size > 0:
-                    thresh = max(14.0, float(np.percentile(region_vals, 55)))
-                    stroke_mask = ((stroke_anomaly >= thresh) & (poly_np > 0)).astype(np.uint8) * 255
-                    if (stroke_mask > 0).sum() < 0.08 * (poly_np > 0).sum():
-                        stroke_mask = poly_np
-                    final_mask = np.maximum(final_mask, stroke_mask)
+                final_mask = np.maximum(final_mask, np.array(poly_img, dtype=np.uint8))
 
         if dilate_px > 0 and final_mask.max() > 0:
             kernel_size = dilate_px * 2 + 1
