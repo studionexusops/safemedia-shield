@@ -1,0 +1,11 @@
+{
+  "git-sync-gate": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python3 ./hooks/check_git_sync.py",
+        "timeout": 10
+      }
+    ]
+  }
+}
