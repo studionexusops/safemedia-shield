@@ -39,7 +39,11 @@ class TestLegalAndStoreAssets(unittest.TestCase):
         # Basic document structure
         self.assertIn("<!DOCTYPE html>", body)
         self.assertIn("Privacy Policy | AdFeed Clean for Google Shopping", body)
-        self.assertIn("Effective Date: October 19, 2026", body)
+        self.assertIn("Effective Date: November 27, 2026 | Version 2.0", body)
+        self.assertIn('lang="en"', body)
+        self.assertIn('<div id="content-en" class="card">', body)
+        self.assertIn('<div id="content-ja" class="card hidden">', body)
+        self.assertNotIn("navigator.language", body)
 
         # Zero-PII commitment
         self.assertIn("We do NOT collect, process, or store end-consumer personal data", body)
@@ -54,6 +58,7 @@ class TestLegalAndStoreAssets(unittest.TestCase):
         # AI training policy & security
         self.assertIn("train public third-party foundation models", body)
         self.assertIn("safemedia.clean_ad_image_url", body)
+        self.assertIn("/api/feed-preview.xml", body)
         self.assertIn("studio.nexus.ops@gmail.com", body)
 
         # Language toggle scripts and elements
@@ -69,11 +74,13 @@ class TestLegalAndStoreAssets(unittest.TestCase):
         self.assertEqual(len(res.content), 0)
 
     def test_privacy_policy_japanese_query_support(self):
-        """TC-LEGAL-03: GET /privacy?lang=ja sets document lang to ja and includes Japanese legal terms."""
+        """TC-LEGAL-03: GET /privacy?lang=ja sets document lang to ja and renders Japanese content visible."""
         res = self.client.get("/privacy?lang=ja")
         self.assertEqual(res.status_code, 200)
         body = res.text
         self.assertIn('lang="ja"', body)
+        self.assertIn('<div id="content-en" class="card hidden">', body)
+        self.assertIn('<div id="content-ja" class="card">', body)
         self.assertIn("プライバシーポリシー", body)
         self.assertIn("データ最小化とプライバシー保護への誓約", body)
         self.assertIn("購入者（一般エンド消費者）の個人情報", body)
@@ -90,14 +97,30 @@ class TestLegalAndStoreAssets(unittest.TestCase):
         body = res.text
 
         self.assertIn("Terms of Service | AdFeed Clean for Google Shopping", body)
+        self.assertIn("Effective Date: November 27, 2026 | Version 2.0", body)
+        self.assertIn('lang="en"', body)
+        self.assertIn('<div id="content-en" class="card">', body)
+        self.assertIn('<div id="content-ja" class="card hidden">', body)
+        self.assertNotIn("navigator.language", body)
+
         self.assertIn("Dual-Feed Smart Routing", body)
         self.assertIn("Zero-UI Always-On Shield", body)
         self.assertIn("1-Click Snapshot Restore", body)
+        self.assertIn("/api/feed-preview.xml", body)
 
-        # Pricing & Trial terms
+        # Pricing, Overage & Trial terms
         self.assertIn("$65.00 USD / month", body)
+        self.assertIn("500 cleaned images / month", body)
+        self.assertIn("$0.05 USD per cleaned image", body)
+        self.assertIn("$100.00 USD / month", body)
         self.assertIn("14 Days Free Trial", body)
+        self.assertIn("50 clean images", body)
         self.assertIn("5 Sample Preview Tests", body)
+
+        # Post-cancellation feed deactivation & GMC unlink instructions
+        self.assertIn("/clean-media/:shop/*", body)
+        self.assertIn("HTTP 404 Not Found", body)
+        self.assertIn("must remove or unlink the Supplemental Feed URL", body)
 
         # Liability Cap & Best-Effort SLA
         self.assertIn("Aggregate Liability Cap: One (1) Month Subscription Fee", body)
@@ -117,15 +140,21 @@ class TestLegalAndStoreAssets(unittest.TestCase):
         self.assertEqual(len(res.content), 0)
 
     def test_terms_of_service_japanese_query_support(self):
-        """TC-LEGAL-06: GET /terms?lang=ja returns Japanese Terms of Service with ¥9,800 cap."""
+        """TC-LEGAL-06: GET /terms?lang=ja renders Japanese Terms of Service with current pricing & feed deactivation notice."""
         res = self.client.get("/terms?lang=ja")
         self.assertEqual(res.status_code, 200)
         body = res.text
         self.assertIn('lang="ja"', body)
+        self.assertIn('<div id="content-en" class="card hidden">', body)
+        self.assertIn('<div id="content-ja" class="card">', body)
         self.assertIn("利用規約", body)
-        self.assertIn("月額 9,800円（$65.00 USD）", body)
+        self.assertIn("月額 $65.00 USD（約 9,800円）", body)
+        self.assertIn("月間500枚の画像処理を含む", body)
+        self.assertIn("$0.05 USD / 枚", body)
         self.assertIn("14日間の無料トライアル", body)
-        self.assertIn("損害賠償額の上限：直近1ヶ月分の利用料（9,800円 / $65.00）", body)
+        self.assertIn("50枚", body)
+        self.assertIn("HTTP 404 Not Found", body)
+        self.assertIn("事前に必ず Google Merchant Center（GMC）および Meta カタログ側の補助フィード設定", body)
 
     # =========================================================================
     # 3. Public Visual Asset Routes (GET /assets/..., HEAD /assets/...)

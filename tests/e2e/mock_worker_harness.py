@@ -212,7 +212,13 @@ def render_legal_from_ts(page_type: str, lang: str = "en") -> str:
         raise ValueError(f"Could not extract {fn_name} template from cloudflare_worker/src/legal.ts")
 
     template = fn_match.group(1)
+    is_ja = lang == "ja"
     rendered = template.replace("${currentLang}", lang)
+    rendered = rendered.replace("${safeNonce}", "")
+    rendered = rendered.replace('${isJa ? "" : " active"}', "" if is_ja else " active")
+    rendered = rendered.replace('${isJa ? " active" : ""}', " active" if is_ja else "")
+    rendered = rendered.replace('${isJa ? " hidden" : ""}', " hidden" if is_ja else "")
+    rendered = rendered.replace('${isJa ? "" : " hidden"}', "" if is_ja else " hidden")
     rendered = rendered.replace(r"\`", "`").replace(r"\${", "${")
     return rendered
 

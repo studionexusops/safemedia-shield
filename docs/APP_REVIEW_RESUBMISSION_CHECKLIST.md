@@ -41,10 +41,10 @@
 
 ### Step 2: Partner Dashboard 設定・本番環境の整合性確認
 - [ ] **課金テストモードの確認**: [`cloudflare_worker/wrangler.toml`](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/wrangler.toml) の `BILLING_TEST_MODE` が本番公開審査向けの設定（`"false"`）になっていることを確認する（参考: [TEST_SPEC_SHOPIFY_INTEGRATION.md#L68-L69](file:///Users/yusuke/antigravity/Micro-SaaS/docs/TEST_SPEC_SHOPIFY_INTEGRATION.md#L68-L69)）。
-- [ ] **料金表記の一致確認**: Partner Dashboard の「Pricing」欄と実装（[shopify.ts#L1288-L1310](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts#L1288-L1310)）が一致しているか確認する。
-  - 基本プラン: `AdFeed Clean Pro` / `$65.00 USD` every 30 days（月500枚まで内包 / `14-day free trial`）
+- [ ] **料金表記の一致確認**: Partner Dashboard の「Pricing」欄と実装（[shopify.ts#L1442-L1471](file:///Users/yusuke/antigravity/Micro-SaaS/cloudflare_worker/src/shopify.ts#L1442-L1471)）が一致しているか確認する。
+  - 基本プラン: `SafeMedia Shield Smart Protection Plan`（Listing表記: `AdFeed Clean Pro`） / `$65.00 USD` every 30 days（月500枚まで内包 / `14-day free trial`・トライアル上限50枚）
   - 超過従量課金: `$0.05 USD` per additional cleaned image（上限 `$100.00 USD`）
-  - *(※ [APP_STORE_LISTING.md#L141](file:///Users/yusuke/antigravity/Micro-SaaS/docs/APP_STORE_LISTING.md#L141) には旧仕様の `Flat-rate` 表記が残っているため、Partner Dashboard 側はハイブリッド従量課金の表記に合わせる)*
+  - *(※ [APP_STORE_LISTING.md](file:///Users/yusuke/antigravity/Micro-SaaS/docs/APP_STORE_LISTING.md) もハイブリッド従量課金仕様へ同期済み)*
 - [ ] **Distribution画面の残項目確認**: Partner Dashboard の審査ステータス画面を開き、`4.5.3` 以外に未解決（Unresolved）フラグが立っている項目がないか目視確認する。
 
 ---

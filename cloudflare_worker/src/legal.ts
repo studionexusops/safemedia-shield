@@ -5,6 +5,7 @@
 
 export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonce: string = ""): string {
   const safeNonce = cspNonce && /^[a-zA-Z0-9+/=_-]+$/.test(cspNonce) ? ` nonce="${cspNonce}"` : "";
+  const isJa = currentLang === "ja";
   return `<!DOCTYPE html>
 <html lang="${currentLang}">
 <head>
@@ -198,8 +199,8 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
         </div>
       </a>
       <div class="lang-switcher">
-        <button class="lang-btn active" onclick="switchLang('en')">English</button>
-        <button class="lang-btn" onclick="switchLang('ja')">日本語</button>
+        <button class="lang-btn${isJa ? "" : " active"}" onclick="switchLang('en')">English</button>
+        <button class="lang-btn${isJa ? " active" : ""}" onclick="switchLang('ja')">日本語</button>
       </div>
     </div>
 
@@ -212,9 +213,9 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
     </div>
 
     <!-- ENGLISH CONTENT -->
-    <div id="content-en" class="card">
+    <div id="content-en" class="card${isJa ? " hidden" : ""}">
       <h1>Privacy Policy</h1>
-      <div class="effective-date">Effective Date: October 19, 2026 | Version 1.0</div>
+      <div class="effective-date">Effective Date: November 27, 2026 | Version 2.0</div>
 
       <div class="callout">
         <div class="callout-title">Commitment to Data Minimization & Privacy</div>
@@ -227,7 +228,7 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
 
       <h2>1. About AdFeed Clean</h2>
       <p>
-        AdFeed Clean provides automated image dual-routing for Shopify merchants. When merchants upload or update product images containing promotional badges or sales banners, our service uses AI inpainting to generate a secondary policy-compliant clean image. This clean image is stored in a private Shopify product metafield (<code>safemedia.clean_ad_image_url</code>) for Google Merchant Center feeds, while your storefront continues displaying the original promotional badges.
+        AdFeed Clean provides automated image dual-routing for Shopify merchants. When merchants upload or update product images containing promotional badges or sales banners, our service uses AI inpainting to generate secondary policy-compliant clean images. These clean images are stored in dedicated Shopify product and variant metafields (<code>safemedia.clean_ad_image_url</code>) and served via an authenticated Supplemental Feed (<code>/api/feed-preview.xml</code>) for Google Merchant Center and Meta Catalog feeds, while your storefront continues displaying the original promotional badges.
       </p>
 
       <h2>2. Information We Collect and Process</h2>
@@ -243,18 +244,18 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
         <tbody>
           <tr>
             <td><strong>Merchant Authentication</strong></td>
-            <td>Shopify store domain (e.g. <code>store.myshopify.com</code>), OAuth API access tokens</td>
-            <td>Authenticating API requests and writing clean image URLs to product metafields.</td>
+            <td>Shopify store domain (e.g. <code>store.myshopify.com</code>), OAuth API access tokens, feed access tokens</td>
+            <td>Authenticating API requests, protecting supplemental feed endpoints, and writing clean image URLs to product and variant metafields.</td>
           </tr>
           <tr>
             <td><strong>Product Catalog Media</strong></td>
-            <td>Product IDs, Variant IDs, existing public product image URLs, MediaImage IDs</td>
-            <td>Analyzing promotional text/overlays, mapping variants to avoid broken links, and generating immutable safety rollback snapshots.</td>
+            <td>Product IDs, Variant IDs, existing public product image URLs, MediaImage IDs, supplemental feed cache</td>
+            <td>Analyzing promotional text/overlays, mapping variants to avoid broken links, serving clean ad feeds, and generating multi-version immutable safety rollback snapshots.</td>
           </tr>
           <tr>
             <td><strong>Service Usage & Billing</strong></td>
-            <td>Canary preview test count (up to 5 free), subscription status, Shopify billing charge IDs</td>
-            <td>Enforcing trial limits and Shopify App Billing API compliance.</td>
+            <td>Canary preview test count (up to 5 free), 14-day trial quota (up to 50 images), monthly usage count (500 included + metered overage), subscription & usage charge IDs, circuit-breaker pause state</td>
+            <td>Enforcing trial/monthly quotas, metered usage billing via Shopify Billing API, and emergency stop controls.</td>
           </tr>
         </tbody>
       </table>
@@ -274,7 +275,7 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
           <strong><code>customers/redact</code></strong>: Because we do not store customer PII, we immediately acknowledge with zero redaction required.
         </li>
         <li>
-          <strong><code>shop/redact</code></strong>: Received 48 hours after a store uninstalls our app. We automatically and permanently delete all tenant data (including R2 snapshots, catalog mappings, and cached billing states) from our systems.
+          <strong><code>shop/redact</code></strong>: Received 48 hours after a store uninstalls our app. We automatically and permanently delete all tenant data (including R2 snapshots, cleaned image assets under <code>/clean-media/</code>, supplemental feed caches, catalog mappings, and billing states) from our systems.
         </li>
         <li>
           <strong><code>app/uninstalled</code></strong>: Received immediately upon app uninstallation. We immediately revoke stored OAuth tokens and deactivate background webhook listeners.
@@ -283,7 +284,7 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
 
       <h2>5. AI Inference & Image Processing Architecture</h2>
       <p>
-        Product images submitted for cleaning are processed via stateless, isolated GPU inference workers. Images are fetched via validated HTTPS URLs, cleaned using AI text/badge inpainting, and saved back to our secure distributed cloud storage and your Shopify product metafields.
+        Product images submitted for cleaning are processed via stateless, isolated GPU inference workers. Images are fetched via validated HTTPS URLs, cleaned using AI text/badge inpainting, and saved back to our secure distributed cloud storage and your Shopify product/variant metafields.
       </p>
       <p>
         <strong>Model Training Policy:</strong> Your product images and metadata are <em>never</em> used to train public third-party foundation models, nor are they shared with unauthorized external entities.
@@ -309,9 +310,9 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
     </div>
 
     <!-- JAPANESE CONTENT -->
-    <div id="content-ja" class="card hidden">
+    <div id="content-ja" class="card${isJa ? "" : " hidden"}">
       <h1>プライバシーポリシー (Privacy Policy)</h1>
-      <div class="effective-date">最終改定日: 2026年10月19日 | バージョン 1.0</div>
+      <div class="effective-date">最終改定日: 2026年11月27日 | バージョン 2.0</div>
 
       <div class="callout">
         <div class="callout-title">データ最小化とプライバシー保護への誓約</div>
@@ -323,7 +324,7 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
 
       <h2>1. 本サービスについて</h2>
       <p>
-        AdFeed Cleanは、Shopifyマーチャント向けに商品画像の「デュアルフィード自動分離配信」を提供します。セール帯や装飾の入った商品画像から、Google広告ポリシーに適合するクリーン画像をAIで自動生成し、Shopifyの専用メタフィールド（<code>safemedia.clean_ad_image_url</code>）に格納します。これにより、自社ストアでは売れる装飾画像を維持したまま、Googleショッピング広告の審査落ち（BAN）を自動回避します。
+        AdFeed Cleanは、Shopifyマーチャント向けに商品画像の「デュアルフィード自動分離配信」を提供します。セール帯や装飾の入った商品画像から、Google広告・Meta広告ポリシーに適合するクリーン画像をAIで自動生成し、Shopifyの専用メタフィールド（商品・バリアント単位の <code>safemedia.clean_ad_image_url</code>）に格納するとともに、認証付き補足フィード（<code>/api/feed-preview.xml</code>）として提供します。これにより、自社ストアでは売れる装飾画像を維持したまま、広告審査落ち（BAN）を自動回避します。
       </p>
 
       <h2>2. 取得および処理する情報</h2>
@@ -339,18 +340,18 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
         <tbody>
           <tr>
             <td><strong>マーチャント認証情報</strong></td>
-            <td>ShopifyストアURL（<code>*.myshopify.com</code>）、OAuthアクセストークン</td>
-            <td>APIリクエストの認証、およびクリーン画像URLのメタフィールド格納</td>
+            <td>ShopifyストアURL（<code>*.myshopify.com</code>）、OAuthアクセストークン、フィードアクセストークン</td>
+            <td>APIリクエストの認証、補足フィードエンドポイントの保護、およびクリーン画像URLのメタフィールド格納</td>
           </tr>
           <tr>
             <td><strong>商品カタログ画像データ</strong></td>
-            <td>商品ID、バリアントID、既存の公開商品画像URL、MediaImage ID</td>
-            <td>セール帯や文字のAI検知・クリーンアップ、バリアント紐付けの維持、および1クリック復元用イミュータブルスナップショットの作成</td>
+            <td>商品ID、バリアントID、既存の公開商品画像URL、MediaImage ID、補足フィードキャッシュ</td>
+            <td>セール帯や文字のAI検知・クリーンアップ、バリアント紐付けの維持、広告フィード配信、および1クリック復元用マルチ世代イミュータブルスナップショットの作成</td>
           </tr>
           <tr>
             <td><strong>利用実績および課金状態</strong></td>
-            <td>カナリア試行回数（最大5件無料）、サブスクリプション契約ステータス</td>
-            <td>無料枠の管理およびShopify Billing API連携</td>
+            <td>カナリア試行回数（最大5件無料）、14日間トライアル枠（最大50枚）、月間処理枚数（500枚内包＋超過従量課金）、課金ID、緊急停止（サーキットブレーカー）状態</td>
+            <td>無料枠・月間クォータの管理、Shopify Billing APIによる従量課金連携、および緊急停止制御</td>
           </tr>
         </tbody>
       </table>
@@ -365,13 +366,13 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
       <ul>
         <li><strong><code>customers/data_request</code></strong>: 当社は購入者データを保持しないため、顧客データが存在しない旨を即時確認・応答します。</li>
         <li><strong><code>customers/redact</code></strong>: 同様に購入者データを保持しないため、即時応答します。</li>
-        <li><strong><code>shop/redact</code></strong>: アプリ削除から48時間後にShopifyより送信される通知です。本通知を受信後、当社システム内に保存されている当該ストアの全スナップショット・設定データを完全削除（物理消去）します。</li>
+        <li><strong><code>shop/redact</code></strong>: アプリ削除から48時間後にShopifyより送信される通知です。本通知を受信後、当社システム内に保存されている当該ストアの全スナップショット、クリーン画像（<code>/clean-media/</code>）、補足フィードキャッシュ、および設定データを完全削除（物理消去）します。</li>
         <li><strong><code>app/uninstalled</code></strong>: アプリのアンインストール時に即時受信し、トークンを無効化してWebhook受信を停止します。</li>
       </ul>
 
       <h2>5. AI推論と画像処理環境</h2>
       <p>
-        画像処理はステートレス（状態非保持）な専用GPU環境で実行されます。処理された画像は安全な分散クラウドストレージおよび貴社Shopifyメタフィールドに格納されます。
+        画像処理はステートレス（状態非保持）な専用GPU環境で実行されます。処理された画像は安全な分散クラウドストレージおよび貴社Shopifyメタフィールド（商品・バリアント単位）に格納されます。
         <strong>マーチャントの画像データが一般公開用の基底AIモデルの学習に使用されることは一切ありません。</strong>
       </p>
 
@@ -412,10 +413,6 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
         document.documentElement.lang = 'en';
       }
     }
-    // Auto-detect browser language if Japanese
-    if (navigator.language && navigator.language.startsWith('ja')) {
-      switchLang('ja');
-    }
   </script>
 </body>
 </html>`;
@@ -423,6 +420,7 @@ export function renderPrivacyPolicyHtml(currentLang: "en" | "ja" = "en", cspNonc
 
 export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNonce: string = ""): string {
   const safeNonce = cspNonce && /^[a-zA-Z0-9+/=_-]+$/.test(cspNonce) ? ` nonce="${cspNonce}"` : "";
+  const isJa = currentLang === "ja";
   return `<!DOCTYPE html>
 <html lang="${currentLang}">
 <head>
@@ -623,8 +621,8 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
         </div>
       </a>
       <div class="lang-switcher">
-        <button class="lang-btn active" onclick="switchLang('en')">English</button>
-        <button class="lang-btn" onclick="switchLang('ja')">日本語</button>
+        <button class="lang-btn${isJa ? "" : " active"}" onclick="switchLang('en')">English</button>
+        <button class="lang-btn${isJa ? " active" : ""}" onclick="switchLang('ja')">日本語</button>
       </div>
     </div>
 
@@ -637,15 +635,15 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
     </div>
 
     <!-- ENGLISH CONTENT -->
-    <div id="content-en" class="card">
+    <div id="content-en" class="card${isJa ? " hidden" : ""}">
       <h1>Terms of Service</h1>
-      <div class="effective-date">Effective Date: October 19, 2026 | Version 1.0</div>
+      <div class="effective-date">Effective Date: November 27, 2026 | Version 2.0</div>
 
       <div class="callout">
         <div class="callout-title">Summary of Key Terms</div>
         <div>
           Welcome to <strong>AdFeed Clean for Google Shopping</strong>. By installing and using this application on your Shopify store,
-          you agree to these Terms. Our service provides automated Dual-Feed ad image generation to safeguard your Google Shopping campaigns
+          you agree to these Terms. Our service provides automated Dual-Feed ad image generation to safeguard your Google Shopping and Meta Catalog campaigns
           while preserving promotional badges on your online store.
         </div>
       </div>
@@ -655,9 +653,9 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
         AdFeed Clean provides an automated, non-destructive image processing pipeline designed for Shopify merchants:
       </p>
       <ul>
-        <li><strong>Dual-Feed Smart Routing:</strong> Retains sales-driving promotional badges and banners on your storefront while automatically generating clean, policy-compliant primary images in private Shopify product metafields (<code>safemedia.clean_ad_image_url</code>) for Google Merchant Center feeds.</li>
-        <li><strong>Zero-UI Always-On Shield:</strong> Asynchronously processes product images via Shopify webhooks (<code>products/create</code>, <code>products/update</code>) in the background without requiring manual intervention.</li>
-        <li><strong>1-Click Snapshot Restore:</strong> Takes immutable snapshots of original product image URLs and variant bindings to secure cloud snapshots before making any updates, allowing one-click rollback at any time.</li>
+        <li><strong>Dual-Feed Smart Routing:</strong> Retains sales-driving promotional badges and banners on your storefront while automatically generating clean, policy-compliant images in dedicated product and variant Shopify metafields (<code>safemedia.clean_ad_image_url</code>) and an authenticated Supplemental XML Feed (<code>/api/feed-preview.xml</code>) for Google Merchant Center and Meta Catalog.</li>
+        <li><strong>Zero-UI Always-On Shield &amp; Circuit Breaker:</strong> Asynchronously processes product images via Shopify webhooks (<code>products/create</code>, <code>products/update</code>) in the background, with instant pause / emergency stop controls.</li>
+        <li><strong>1-Click Snapshot Restore:</strong> Captures multi-version immutable snapshots (including baseline and point-in-time states) of original product image URLs and variant bindings in secure cloud storage before updates, allowing safe one-click rollback at any time (gracefully skipping deleted products or variants).</li>
       </ul>
 
       <h2>2. Subscription, Free Trial & Billing Terms</h2>
@@ -671,15 +669,19 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
         <tbody>
           <tr>
             <td><strong>Monthly Subscription Fee</strong></td>
-            <td><strong>$65.00 USD / month</strong> (billed via Shopify App Billing API)</td>
+            <td><strong>$65.00 USD / month</strong> (billed via Shopify App Billing API; includes <strong>500 cleaned images / month</strong>)</td>
+          </tr>
+          <tr>
+            <td><strong>Usage-Based Overage</strong></td>
+            <td><strong>$0.05 USD per cleaned image</strong> beyond 500 images/month, <strong>capped at $100.00 USD / month</strong> in overage charges</td>
           </tr>
           <tr>
             <td><strong>Free Trial Period</strong></td>
-            <td><strong>14 Days Free Trial</strong> upon initial installation</td>
+            <td><strong>14 Days Free Trial</strong> upon initial installation (includes up to <strong>50 clean images</strong> during the trial period)</td>
           </tr>
           <tr>
             <td><strong>Free Sample Quota</strong></td>
-            <td><strong>5 Sample Preview Tests</strong> included prior to subscription commitment</td>
+            <td><strong>5 Sample Preview Tests</strong> (Canary Preview) included prior to subscription commitment</td>
           </tr>
           <tr>
             <td><strong>Billing Cycle & Cancellation</strong></td>
@@ -696,9 +698,9 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
         We recognize the critical value of your store catalog integrity. Our application operates under a strict "Store Integrity First" standard:
       </p>
       <ul>
-        <li><strong>Non-Destructive Routing:</strong> Original master images and theme assets on your storefront are never deleted, overwritten, or modified. Clean images are stored exclusively in dedicated metafields.</li>
-        <li><strong>Variant Protection:</strong> Before updating any media references, the system cross-checks all product variant IDs (<code>MediaImage</code> bindings) to guarantee no variant links are unseated.</li>
-        <li><strong>Safety Snapshots:</strong> Every catalog modification creates an immutable snapshot in secure cloud storage that can be restored with a single click.</li>
+        <li><strong>Non-Destructive Routing:</strong> Original master images and theme assets on your storefront are never deleted, overwritten, or modified. Clean images are stored exclusively in dedicated product and variant metafields.</li>
+        <li><strong>Variant Protection:</strong> Before updating any media references, the system cross-checks all product variant IDs (<code>MediaImage</code> bindings and variant-level metafields) to guarantee no variant links are unseated.</li>
+        <li><strong>Safety Snapshots:</strong> Every catalog modification creates a multi-version immutable snapshot in secure cloud storage that can be restored with a single click.</li>
       </ul>
 
       <h2>4. Service Level & Best-Effort SLA</h2>
@@ -718,18 +720,19 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
           or account suspensions by third-party advertising platforms).
           <br /><br />
           <strong>Our aggregate financial liability arising out of or related to your use of this service shall be strictly capped
-          at the total amount paid by you for this application during the one (1) month immediately preceding the event giving rise to liability ($65.00 USD).</strong>
+          at the total amount actually paid by you for this application during the one (1) month immediately preceding the event giving rise to liability ($65.00 USD base subscription fee plus any applicable usage-based overage fees paid in that month).</strong>
         </div>
       </div>
 
-      <h2>6. Termination & App Uninstallation</h2>
+      <h2>6. Termination, App Uninstallation &amp; Post-Cancellation Feed Policy</h2>
       <p>
-        You may terminate this agreement at any time by removing the application from your Shopify admin panel. Upon uninstallation:
+        You may terminate this agreement at any time by removing the application from your Shopify admin panel. Clean image URLs (<code>/clean-media/:shop/*</code>) and Supplemental Feed endpoints (<code>/api/feed-preview.xml</code>, <code>/api/ad-feed/preview</code>) are provided <strong>exclusively while your installation and subscription remain active</strong>. Upon uninstallation or cancellation:
       </p>
       <ul>
-        <li>All recurring subscription billing ceases immediately.</li>
-        <li>Webhooks and background listeners are immediately deactivated.</li>
-        <li>Within 48 hours, in accordance with Shopify's <code>shop/redact</code> protocol, all stored snapshots and tenant configuration are permanently purged.</li>
+        <li>All recurring subscription and usage-based billing ceases immediately.</li>
+        <li>Webhooks, background listeners, and supplemental feed access are deactivated.</li>
+        <li>Within 48 hours, in accordance with Shopify's <code>shop/redact</code> protocol, all stored snapshots, cleaned image assets, and tenant configuration are permanently purged. Subsequent requests to <code>/clean-media/:shop/*</code> or feed endpoints will fail (returning <strong>HTTP 404 Not Found</strong> or <strong>401 Unauthorized</strong>).</li>
+        <li><strong>Required Merchant Action:</strong> Before or upon uninstalling/cancelling, you <strong>must remove or unlink the Supplemental Feed URL and <code>safemedia.clean_ad_image_url</code> mapping</strong> in Google Merchant Center and Meta Catalog to prevent feed fetch errors or broken ad image links.</li>
       </ul>
 
       <h2>7. Merchant Responsibilities</h2>
@@ -737,7 +740,7 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
       <ul>
         <li>Maintain valid administrative permissions on your Shopify store.</li>
         <li>Ensure you possess the legal rights to use and publish all uploaded catalog images.</li>
-        <li>Configure your Google Merchant Center feed to reference the appropriate metafield (<code>safemedia.clean_ad_image_url</code>) in accordance with provided documentation.</li>
+        <li>Configure your Google Merchant Center and Meta Catalog feeds to reference the appropriate metafield (<code>safemedia.clean_ad_image_url</code>) or Supplemental Feed URL in accordance with provided documentation, and unlink them upon cancellation.</li>
       </ul>
 
       <h2>8. Governing Law & Updates to Terms</h2>
@@ -752,25 +755,25 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
     </div>
 
     <!-- JAPANESE CONTENT -->
-    <div id="content-ja" class="card hidden">
+    <div id="content-ja" class="card${isJa ? "" : " hidden"}">
       <h1>利用規約 (Terms of Service)</h1>
-      <div class="effective-date">最終改定日: 2026年10月19日 | バージョン 1.0</div>
+      <div class="effective-date">最終改定日: 2026年11月27日 | バージョン 2.0</div>
 
       <div class="callout">
         <div class="callout-title">重要条項の要約</div>
         <div>
           <strong>AdFeed Clean for Google Shopping</strong>（以下「本サービス」）をご利用いただきありがとうございます。
           本アプリをShopifyストアにインストールすることにより、本規約に同意したものとみなされます。
-          本サービスは、自社ストアの売れるセール帯を残したまま、Googleショッピング広告の審査落ち（BAN）を自動回避するデュアルフィード画像処理を提供します。
+          本サービスは、自社ストアの売れるセール帯を残したまま、Googleショッピング広告およびMetaカタログ広告の審査落ち（BAN）を自動回避するデュアルフィード画像処理を提供します。
         </div>
       </div>
 
       <h2>1. サービス内容</h2>
       <p>AdFeed Cleanは、Shopifyマーチャント向けに以下の機能を提供します：</p>
       <ul>
-        <li><strong>デュアルフィード自動分離配信:</strong> 自社ストアの装飾画像（セール帯・透かし等）には一切手を加えず、Google広告用のクリーン画像のみをAIで生成してShopifyの専用メタフィールド（<code>safemedia.clean_ad_image_url</code>）に自動格納します。</li>
-        <li><strong>ゼロUI・常時自動保護:</strong> 商品の新規登録や画像更新（Webhook）をトリガーとして、バックグラウンドで完全自動処理します。</li>
-        <li><strong>1クリック・ロールバック機能:</strong> 変更前に元画像とバリアント紐付けのイミュータブルスナップショットを安全なクラウドストレージに保存し、万一の際も1クリックで10秒以内に完全復元可能です。</li>
+        <li><strong>デュアルフィード自動分離配信:</strong> 自社ストアの装飾画像（セール帯・透かし等）には一切手を加えず、広告用のクリーン画像のみをAIで生成してShopifyの専用メタフィールド（商品・バリアント単位の <code>safemedia.clean_ad_image_url</code>）および認証付き補足フィード（<code>/api/feed-preview.xml</code>）へ自動格納・配信します。</li>
+        <li><strong>ゼロUI・常時自動保護＆緊急停止:</strong> 商品の新規登録や画像更新（Webhook）をトリガーとしてバックグラウンドで自動処理し、万一の際はダッシュボードから即時一時停止（サーキットブレーカー）が可能です。</li>
+        <li><strong>1クリック・ロールバック機能:</strong> 変更前に元画像とバリアント紐付けのマルチ世代イミュータブルスナップショット（初期ベースライン含む）を安全なクラウドストレージに保存し、1クリックで復元可能です（削除済み商品・バリアントは安全にスキップされます）。</li>
       </ul>
 
       <h2>2. 料金プラン・無料トライアル・課金条件</h2>
@@ -783,12 +786,16 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
         </thead>
         <tbody>
           <tr>
-            <td><strong>月額利用料</strong></td>
-            <td><strong>月額 9,800円（$65.00 USD）</strong>（Shopify App Billing経由での請求）</td>
+            <td><strong>月額基本利用料</strong></td>
+            <td><strong>月額 $65.00 USD（約 9,800円）</strong>（Shopify App Billing経由での請求／<strong>月間500枚の画像処理を含む</strong>）</td>
+          </tr>
+          <tr>
+            <td><strong>超過従量課金</strong></td>
+            <td>月間500枚を超過した分は <strong>$0.05 USD / 枚</strong>（<strong>超過分の月額上限 $100.00 USD</strong>）</td>
           </tr>
           <tr>
             <td><strong>無料トライアル期間</strong></td>
-            <td><strong>初回インストール時 14日間の無料トライアル</strong></td>
+            <td><strong>初回インストール時 14日間の無料トライアル</strong>（期間中の処理上限 <strong>50枚</strong>）</td>
           </tr>
           <tr>
             <td><strong>サンプル無料枠</strong></td>
@@ -807,29 +814,34 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
       <h2>3. ストアデータの安全性とバリアント保護設計</h2>
       <ul>
         <li><strong>非破壊オペレーション:</strong> 自社ストアのメイン画像やテーマファイルを直接上書き・破壊することは決してありません。</li>
-        <li><strong>バリアント紐付け完全保護:</strong> 画像の更新前に各バリアント（<code>MediaImage</code>）のマッピングを保持・検証し、バリアント選択が外れる事故を防止します。</li>
+        <li><strong>バリアント紐付け完全保護:</strong> 画像の更新前に各バリアント（<code>MediaImage</code> およびバリアント単位メタフィールド）のマッピングを保持・検証し、バリアント選択が外れる事故を防止します。</li>
       </ul>
 
       <h2>4. 免責事項およびベストエフォート提供</h2>
       <p>
-        AIによる文字・装飾除去は<strong>ベストエフォート（最善努力）</strong>にて提供されます。高い精度でセール帯や透かしを検出・補完しますが、あらゆるデザインの装飾の完全な除去や、第三者プラットフォーム（Google等）による審査承認を100%法的に保証するものではありません。
+        AIによる文字・装飾除去は<strong>ベストエフォート（最善努力）</strong>にて提供されます。高い精度でセール帯や透かしを検出・補完しますが、あらゆるデザインの装飾の完全な除去や、第三者プラットフォーム（Google・Meta等）による審査承認を100%法的に保証するものではありません。
         マーチャント様におかれましては、全商品一括生成の前に、必ず5件のカナリアテスト機能にて仕上がりをご確認ください。
       </p>
 
       <h2>5. 損害賠償額の上限（ライアビリティ・キャップ）</h2>
       <div class="callout callout-warning">
-        <div class="callout-title">損害賠償額の上限：直近1ヶ月分の利用料（9,800円 / $65.00）</div>
+        <div class="callout-title">損害賠償額の上限：直近1ヶ月分の実支払利用料（基本料 $65.00 / 9,800円 ＋ 超過従量分）</div>
         <div>
           法律で認められる最大限の範囲において、本サービスの利用または利用不能から生じるいかなる間接損害、特別損害、結果的損害、逸失利益（広告配信停止による売上損失等を含む）について、当社は責任を負いません。
           <br /><br />
-          <strong>いかなる場合においても、当社がマーチャントに対して負う損害賠償責任の総額は、損害の原因となった事象の直前1ヶ月間にマーチャントが当社に実際に支払った本サービスの利用料金（9,800円 / $65.00 USD）を上限とします。</strong>
+          <strong>いかなる場合においても、当社がマーチャントに対して負う損害賠償責任の総額は、損害の原因となった事象の直前1ヶ月間にマーチャントが当社に実際に支払った本サービスの利用料金（基本料金 $65.00 USD / 9,800円 および当該月の超過従量課金額の合計）を上限とします。</strong>
         </div>
       </div>
 
-      <h2>6. 契約終了（アンインストール）</h2>
+      <h2>6. 契約終了（アンインストール）と解約後の配信停止・設定解除手順</h2>
       <p>
-        マーチャントはShopify管理画面から本アプリを削除することで、いつでも契約を終了できます。アンインストールにより次回以降の請求は即時停止され、Shopifyのデータ削除手順（<code>shop/redact</code>）に従い、保存されたスナップショット等の設定情報は48時間以内に完全消去されます。
+        マーチャントはShopify管理画面から本アプリを削除することで、いつでも契約を終了できます。なお、クリーン画像URL（<code>/clean-media/:shop/*</code>）および補足フィード（<code>/api/feed-preview.xml</code>、<code>/api/ad-feed/preview</code>）の配信は、<strong>有効なインストールおよびサブスクリプション期間中のみ提供されます</strong>。
       </p>
+      <ul>
+        <li>アンインストールにより次回以降の請求およびWebhook受信は即時停止されます。</li>
+        <li>Shopifyのデータ削除手順（<code>shop/redact</code>）に従い、保存されたスナップショット・クリーン画像・設定情報は48時間以内に完全消去され、以降の画像・フィードアクセスは配信停止（<strong>HTTP 404 Not Found</strong> または <strong>401 Unauthorized</strong>）となります。</li>
+        <li><strong>解約時の必須お手続き:</strong> 解約またはアンインストールを行う際は、配信停止によるフィード取得エラーを防ぐため、<strong>事前に必ず Google Merchant Center（GMC）および Meta カタログ側の補助フィード設定・<code>safemedia.clean_ad_image_url</code> マッピングを解除してください</strong>。</li>
+      </ul>
 
       <h2>7. 準拠法および管轄裁判所</h2>
       <p>本規約は日本法に準拠し、本規約に関して生じた紛争については東京地方裁判所を第一審の専属的合意管轄裁判所とします。</p>
@@ -863,9 +875,6 @@ export function renderTermsOfServiceHtml(currentLang: "en" | "ja" = "en", cspNon
         btns[0].classList.add('active');
         document.documentElement.lang = 'en';
       }
-    }
-    if (navigator.language && navigator.language.startsWith('ja')) {
-      switchLang('ja');
     }
   </script>
 </body>
